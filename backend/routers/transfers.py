@@ -159,8 +159,6 @@ def create_v2_transfer(
             {"step": "DELIVERY_VERIFIED", "ts": None, "done": False},
             {"step": "TRANSFER_COMPLETED", "ts": None, "done": False},
         ],
-        "pickup_otp_code": pickup_otp,
-        "delivery_otp_code": "123456",
         "eta_minutes": mapbox_info["duration_min"],
         "distance_km": mapbox_info["distance_km"],
         "route_geometry": mapbox_info["route_geometry"],
@@ -264,7 +262,6 @@ def request_pickup_otp(
         created_by=current_user.get("sub", "demo-user"),
     )
     if id in _TRANSFERS_DB:
-        _TRANSFERS_DB[id]["pickup_otp_code"] = otp_code
         _TRANSFERS_DB[id]["status"] = "PICKUP_OTP_REQUIRED"
 
     return {"data": {"challenge_id": challenge_id, "otp_code": otp_code, "purpose": "PICKUP"}, "error": None}
@@ -318,7 +315,6 @@ def request_delivery_otp(
         created_by=current_user.get("sub", "demo-user"),
     )
     if id in _TRANSFERS_DB:
-        _TRANSFERS_DB[id]["delivery_otp_code"] = otp_code
         _TRANSFERS_DB[id]["status"] = "DELIVERY_OTP_REQUIRED"
 
     return {"data": {"challenge_id": challenge_id, "otp_code": otp_code, "purpose": "DELIVERY"}, "error": None}
@@ -397,8 +393,6 @@ def list_v2_transfers():
                 {"step": "DELIVERY_VERIFIED", "ts": None, "done": False},
                 {"step": "TRANSFER_COMPLETED", "ts": None, "done": False},
             ],
-            "pickup_otp_code": "849201",
-            "delivery_otp_code": "123456",
             "eta_minutes": mapbox_demo["duration_min"],
             "distance_km": mapbox_demo["distance_km"],
             "route_geometry": mapbox_demo["route_geometry"],

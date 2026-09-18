@@ -54,8 +54,6 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
   const activeBackendTransfer = liveTransfers && liveTransfers.length > 0 ? liveTransfers[liveTransfers.length - 1] : null;
   const transferState = activeBackendTransfer?.status || localState;
   const activeTransferId = activeBackendTransfer?.id || "TRF-DEMO-001";
-  const displayPickupOtp = activeBackendTransfer?.pickup_otp_code || pickupOtp;
-  const displayDeliveryOtp = activeBackendTransfer?.delivery_otp_code || deliveryOtp;
 
   // Backend Mutations for Live 2-Laptop Sync
   const createMutation = useMutation({
@@ -147,14 +145,13 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
 
   // OTP Verification Handoff
   const handleVerifyOtp = () => {
+    if (otpInput.length !== 6) return;
     if (otpModalOpen === "pickup") {
-      verifyPickupOtpMutation.mutate({ id: activeTransferId, otp: otpInput || displayPickupOtp });
-      setLocalState("IN_TRANSIT");
-      setPendingMsg("Pickup OTP Authorized! Custody transferred to Shiprocket courier driver (Ramesh V.). Shipment IN_TRANSIT.");
+      verifyPickupOtpMutation.mutate({ id: activeTransferId, otp: otpInput });
+      setPendingMsg("Pickup OTP verified! Custody transferred to courier. Shipment IN_TRANSIT.");
     } else if (otpModalOpen === "delivery") {
-      verifyDeliveryOtpMutation.mutate({ id: activeTransferId, otp: otpInput || displayDeliveryOtp });
-      setLocalState("TRANSFER_COMPLETED");
-      setPendingMsg("Receipt OTP Authorized! Transfer completed. Inventory settled transactionally (Source -12 SDP, Destination +12 SDP).");
+      verifyDeliveryOtpMutation.mutate({ id: activeTransferId, otp: otpInput });
+      setPendingMsg("Receipt OTP verified! Transfer completed. Inventory settled (Source −N, Destination +N).");
     }
     setOtpModalOpen(null);
     setOtpInput("");
@@ -372,7 +369,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
                 onClick={() => setOtpModalOpen("pickup")}
                 className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
               >
-                Verify Pickup OTP ({displayPickupOtp}) →
+                Verify Pickup OTP →
               </button>
             )}
 
@@ -388,7 +385,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
                   onClick={() => setOtpModalOpen("delivery")}
                   className="px-4 py-2 bg-[#1A8A2C] text-white text-[12px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
                 >
-                  Verify Receipt OTP ({displayDeliveryOtp}) →
+                  Verify Receipt OTP →
                 </button>
               </>
             )}
@@ -622,28 +619,37 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               </p>
               <p className="text-[12px] text-[#1D1D1F] leading-relaxed">
                 {otpModalOpen === "pickup"
-                  ? `Verify 6-digit OTP provided by courier rider (Ramesh V. - Shiprocket/Delhivery) before transferring custody from AVAILABLE to UNITS_RESERVED → IN_TRANSIT. Active Pickup OTP: ${displayPickupOtp}`
-                  : `Verify 6-digit OTP upon arrival before confirming unit receipt and reallocating inventory in eRaktKosh ledger. Active Delivery OTP: ${displayDeliveryOtp}`}
+                  ? "Enter the 6-digit OTP provided by the source hospital officer to confirm pickup and transfer custody to the courier."
+                  : "Enter the 6-digit OTP provided by the courier driver to confirm delivery and settle inventory in the eRaktKosh ledger."}
               </p>
             </div>
 
             <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">6-Digit Cryptographic OTP</label>
+              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">6-Digit OTP Code</label>
               <input
                 type="text"
                 maxLength={6}
-                placeholder={otpModalOpen === "pickup" ? displayPickupOtp : displayDeliveryOtp}
+                placeholder="Enter 6-digit OTP"
                 value={otpInput}
-                onChange={(e) => setOtpInput(e.target.value)}
+                onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
                 className="w-full border border-[#E5E5E7] rounded-[8px] p-3 text-[20px] font-mono tracking-widest text-center font-bold text-[#0071E3]"
+                autoFocus
               />
+              {otpInput.length > 0 && otpInput.length < 6 && (
+                <p className="text-[11px] text-[#C41230] mt-1">Please enter all 6 digits</p>
+              )}
             </div>
 
             <button
               onClick={handleVerifyOtp}
-              className="w-full py-3 bg-[#1A8A2C] text-white text-[14px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer shadow-sm"
+              disabled={otpInput.length !== 6}
+              className={`w-full py-3 text-white text-[14px] font-semibold rounded-full transition-colors cursor-pointer shadow-sm ${
+                otpInput.length === 6
+                  ? "bg-[#1A8A2C] hover:bg-[#157424]"
+                  : "bg-[#AEAEB2] cursor-not-allowed"
+              }`}
             >
-              Authorize OTP & Update Custody State
+              {otpInput.length === 6 ? "Verify OTP & Update Custody →" : "Enter 6-digit OTP to continue"}
             </button>
           </div>
         </Drawer>
