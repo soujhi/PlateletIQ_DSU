@@ -288,7 +288,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
             {transferState === "IN_TRANSIT" && (
               <>
                 <button
-                  onClick={() => navigate("/tracking/TRF-DEMO-001")}
+                  onClick={() => onViewTracking?.()}
                   className="px-3.5 py-2 bg-[#F5F5F7] text-[#1D1D1F] border border-[#E5E5E7] text-[12px] font-semibold rounded-full hover:bg-[#EAEAEA] transition-colors cursor-pointer"
                 >
                   Live Flipkart Tracking 🗺
