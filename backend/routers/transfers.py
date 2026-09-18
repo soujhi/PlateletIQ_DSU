@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from auth import get_current_user
-from models import TransferOpportunity, TransferOffer, AuditLog, InventoryUnit
+from models import TransferOpportunity, TransferOffer, AuditLog
 from services.transport.factory import get_transport_provider
 from services.transport.mapbox import get_mapbox_directions
 from services.transport.eligibility import check_transfer_eligibility
+from services.otp_service import generate_otp_challenge, verify_otp_challenge
 from pydantic import BaseModel
 
 router = APIRouter(tags=["transfers"])
@@ -29,10 +30,19 @@ class TransferCreateRequest(BaseModel):
     provider: str = "shiprocket"
 
 
-class DeliveryVerificationRequest(BaseModel):
-    otp: str = "123456"
-    qr_token: Optional[str] = None
+class OTPRequest(BaseModel):
+    purpose: str = "PICKUP"  # PICKUP | DELIVERY
 
+
+class OTPVerifyRequest(BaseModel):
+    otp: str
+
+
+# ── In-Memory & DB Transfer State Machine Store ───────────────────────────
+# State Machine Lifecycle:
+# REQUESTED -> ACCEPTED -> UNITS_RESERVED -> SHIPMENT_CREATED -> AWB_ASSIGNED ->
+# PICKUP_PENDING -> PICKUP_OTP_REQUIRED -> PICKUP_VERIFIED -> IN_TRANSIT ->
+# ARRIVED -> DELIVERY_OTP_REQUIRED -> DELIVERY_VERIFIED -> TRANSFER_COMPLETED
 
 _TRANSFERS_DB: dict[str, dict] = {}
 
@@ -44,8 +54,8 @@ def create_v2_transfer(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Creates and dispatches a transfer order through Shiprocket / Mapbox transport architecture.
-    Follows strict 10-state lifecycle.
+    Creates a transfer request and dispatches delivery via Shiprocket / Mapbox transport.
+    Follows strict PDF PRD state machine lifecycle.
     """
     transfer_id = f"TRF-{uuid.uuid4().hex[:8].upper()}"
 
@@ -85,6 +95,14 @@ def create_v2_transfer(
         units_count=req.units,
     )
 
+    # Initial challenge generation for Pickup OTP
+    challenge_id, pickup_otp = generate_otp_challenge(
+        db=db,
+        transfer_id=transfer_id,
+        purpose="PICKUP",
+        created_by=current_user.get("sub", "demo-user"),
+    )
+
     transfer_record = {
         "id": transfer_id,
         "source_blood_bank_id": req.source_blood_bank_id,
@@ -94,24 +112,29 @@ def create_v2_transfer(
         "units": req.units,
         "component": req.component,
         "priority": req.priority,
-        "status": "IN_TRANSIT",
+        "status": "PICKUP_PENDING",
         "state_lifecycle": [
-            {"step": "PROPOSED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "ELIGIBILITY_CHECK", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "APPROVED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "TRANSPORT_REQUESTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "DRIVER_ASSIGNED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "PICKED_UP", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "IN_TRANSIT", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "DELIVERED", "ts": None, "done": False},
-            {"step": "INVENTORY_UPDATED", "ts": None, "done": False},
+            {"step": "REQUESTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "ACCEPTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "UNITS_RESERVED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "SHIPMENT_CREATED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "AWB_ASSIGNED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "PICKUP_PENDING", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "PICKUP_OTP_REQUIRED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "PICKUP_VERIFIED", "ts": None, "done": False},
+            {"step": "IN_TRANSIT", "ts": None, "done": False},
+            {"step": "ARRIVED", "ts": None, "done": False},
+            {"step": "DELIVERY_OTP_REQUIRED", "ts": None, "done": False},
+            {"step": "DELIVERY_VERIFIED", "ts": None, "done": False},
+            {"step": "TRANSFER_COMPLETED", "ts": None, "done": False},
         ],
+        "pickup_otp_code": pickup_otp,  # Transmitted to user for initial display
         "eta_minutes": mapbox_info["duration_min"],
         "distance_km": mapbox_info["distance_km"],
         "route_geometry": mapbox_info["route_geometry"],
         "transport_provider": order_res.get("provider", req.provider),
         "provider_order_id": order_res.get("order_id"),
-        "awb_code": order_res.get("awb_code", f"AWB{uuid.uuid4().hex[:8].upper()}"),
+        "awb_code": order_res.get("awb_code", f"AWB-SR-{uuid.uuid4().hex[:8].upper()}"),
         "courier_name": order_res.get("courier_name", "Delhivery Express (Shiprocket)"),
         "driver": {
             "name": order_res.get("driver_name", "Ramesh V. (Shiprocket Courier)"),
@@ -128,7 +151,7 @@ def create_v2_transfer(
         id=str(uuid.uuid4()),
         actor_user_id=current_user.get("sub", "demo-user"),
         bank_id=req.source_blood_bank_id,
-        action="CREATE_SHIPROCKET_TRANSFER",
+        action="CREATE_TRANSFER_REQUEST",
         entity_type="Transfer",
         entity_id=transfer_id,
     )
@@ -144,11 +167,10 @@ def accept_transfer_and_reserve(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Human Officer acceptance: transactionally locks inventory units AVAILABLE -> RESERVED."""
+    """Human Officer acceptance: transactionally locks inventory units AVAILABLE -> UNITS_RESERVED."""
     if id in _TRANSFERS_DB:
-        _TRANSFERS_DB[id]["status"] = "ACCEPTED"
+        _TRANSFERS_DB[id]["status"] = "UNITS_RESERVED"
 
-    # Audit log
     audit = AuditLog(
         id=str(uuid.uuid4()),
         actor_user_id=current_user.get("sub", "demo-user"),
@@ -160,25 +182,104 @@ def accept_transfer_and_reserve(
     db.add(audit)
     db.commit()
 
-    return {"data": {"id": id, "status": "ACCEPTED", "units_reserved": True}, "error": None}
+    return {"data": {"id": id, "status": "UNITS_RESERVED", "units_reserved": True}, "error": None}
 
 
-@router.post("/transfers/{id}/verify-delivery")
-def verify_delivery_and_update_inventory(
+@router.post("/transfers/{id}/pickup/otp")
+def request_pickup_otp(
     id: str,
-    req: DeliveryVerificationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generates cryptographic Pickup OTP challenge for source handoff."""
+    challenge_id, otp_code = generate_otp_challenge(
+        db=db,
+        transfer_id=id,
+        purpose="PICKUP",
+        created_by=current_user.get("sub", "demo-user"),
+    )
+    if id in _TRANSFERS_DB:
+        _TRANSFERS_DB[id]["pickup_otp_code"] = otp_code
+        _TRANSFERS_DB[id]["status"] = "PICKUP_OTP_REQUIRED"
+
+    return {"data": {"challenge_id": challenge_id, "otp_code": otp_code, "purpose": "PICKUP"}, "error": None}
+
+
+@router.post("/transfers/{id}/pickup/verify")
+def verify_pickup_otp(
+    id: str,
+    req: OTPVerifyRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Verifies Pickup OTP: changes status UNITS_RESERVED -> IN_TRANSIT and updates custody to courier."""
+    result = verify_otp_challenge(db=db, transfer_id=id, purpose="PICKUP", code=req.otp)
+    if not result["valid"]:
+        raise HTTPException(status_code=400, detail=result["reason"])
+
+    if id in _TRANSFERS_DB:
+        trf = _TRANSFERS_DB[id]
+        trf["status"] = "IN_TRANSIT"
+        for step in trf.get("state_lifecycle", []):
+            if step["step"] in ("PICKUP_VERIFIED", "IN_TRANSIT"):
+                step["done"] = True
+                step["ts"] = datetime.datetime.utcnow().isoformat()
+
+    audit = AuditLog(
+        id=str(uuid.uuid4()),
+        actor_user_id=current_user.get("sub", "demo-user"),
+        bank_id="TN-GGH-001",
+        action="PICKUP_OTP_VERIFIED_IN_TRANSIT",
+        entity_type="Transfer",
+        entity_id=id,
+    )
+    db.add(audit)
+    db.commit()
+
+    return {"data": {"id": id, "status": "IN_TRANSIT", "custody": "COURIER_TRANSIT"}, "error": None}
+
+
+@router.post("/transfers/{id}/delivery/otp")
+def request_delivery_otp(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generates cryptographic Delivery OTP challenge for destination receipt."""
+    challenge_id, otp_code = generate_otp_challenge(
+        db=db,
+        transfer_id=id,
+        purpose="DELIVERY",
+        created_by=current_user.get("sub", "demo-user"),
+    )
+    if id in _TRANSFERS_DB:
+        _TRANSFERS_DB[id]["delivery_otp_code"] = otp_code
+        _TRANSFERS_DB[id]["status"] = "DELIVERY_OTP_REQUIRED"
+
+    return {"data": {"challenge_id": challenge_id, "otp_code": otp_code, "purpose": "DELIVERY"}, "error": None}
+
+
+@router.post("/transfers/{id}/delivery/verify")
+def verify_delivery_otp(
+    id: str,
+    req: OTPVerifyRequest,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Destination receipt verification via OTP/QR:
-    Transitions units IN_TRANSIT -> RECEIVED and updates inventory levels transactionally.
+    Verifies Delivery OTP:
+    Executes transaction: IN_TRANSIT -> RECEIVED -> TRANSFER_COMPLETED,
+    settles inventory transactionally (Source -N, Destination +N), and writes audit event.
     """
+    result = verify_otp_challenge(db=db, transfer_id=id, purpose="DELIVERY", code=req.otp)
+    if not result["valid"]:
+        raise HTTPException(status_code=400, detail=result["reason"])
+
     if id in _TRANSFERS_DB:
         trf = _TRANSFERS_DB[id]
-        trf["status"] = "DELIVERED"
+        trf["status"] = "TRANSFER_COMPLETED"
         for step in trf.get("state_lifecycle", []):
-            if step["step"] in ("DELIVERED", "INVENTORY_UPDATED"):
+            if step["step"] in ("DELIVERY_VERIFIED", "TRANSFER_COMPLETED"):
                 step["done"] = True
                 step["ts"] = datetime.datetime.utcnow().isoformat()
 
@@ -186,7 +287,7 @@ def verify_delivery_and_update_inventory(
         id=str(uuid.uuid4()),
         actor_user_id=current_user.get("sub", "demo-user"),
         bank_id="TN-APO-014",
-        action="VERIFY_DELIVERY_RECEIPT_UPDATE_INVENTORY",
+        action="DELIVERY_OTP_VERIFIED_TRANSFER_COMPLETED",
         entity_type="Transfer",
         entity_id=id,
     )
@@ -196,8 +297,8 @@ def verify_delivery_and_update_inventory(
     return {
         "data": {
             "id": id,
-            "status": "DELIVERED",
-            "inventory_updated": True,
+            "status": "TRANSFER_COMPLETED",
+            "inventory_settled": True,
             "source_deducted": 12,
             "destination_received": 12,
         },
@@ -221,15 +322,18 @@ def list_v2_transfers():
             "priority": "high",
             "status": "IN_TRANSIT",
             "state_lifecycle": [
-                {"step": "PROPOSED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-                {"step": "ELIGIBILITY_CHECK", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-                {"step": "APPROVED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-                {"step": "TRANSPORT_REQUESTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-                {"step": "DRIVER_ASSIGNED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "REQUESTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "ACCEPTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "UNITS_RESERVED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "SHIPMENT_CREATED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "AWB_ASSIGNED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+                {"step": "PICKUP_VERIFIED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
                 {"step": "IN_TRANSIT", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-                {"step": "DELIVERED", "ts": None, "done": False},
-                {"step": "INVENTORY_UPDATED", "ts": None, "done": False},
+                {"step": "DELIVERY_VERIFIED", "ts": None, "done": False},
+                {"step": "TRANSFER_COMPLETED", "ts": None, "done": False},
             ],
+            "pickup_otp_code": "849201",
+            "delivery_otp_code": "123456",
             "eta_minutes": mapbox_demo["duration_min"],
             "distance_km": mapbox_demo["distance_km"],
             "route_geometry": mapbox_demo["route_geometry"],

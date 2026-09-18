@@ -6,6 +6,8 @@ from models.transfer import TransferOpportunity, TransferOffer
 from models.external import ExternalSnapshot, ExternalInventoryRecord
 from models.audit import AuditLog
 from models.config import SystemConfig
+from models.otp import OTPChallenge
+from models.shipment import Shipment, TrackingEvent
 
 __all__ = [
     "Bank",
@@ -22,5 +24,9 @@ __all__ = [
     "ExternalInventoryRecord",
     "AuditLog",
     "SystemConfig",
+    "OTPChallenge",
+    "Shipment",
+    "TrackingEvent",
 ]
+
 
