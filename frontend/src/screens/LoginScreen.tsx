@@ -124,7 +124,8 @@ export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
     e.preventDefault();
     setLoading(true);
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+      const host = typeof window !== "undefined" && window.location.hostname ? window.location.hostname : "localhost";
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || `http://${host}:8000/api/v1`;
       const res = await fetch(`${baseUrl}/auth/switch-bank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -147,7 +148,8 @@ export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
   const handleGoogleRedirect = async () => {
     try {
       setLoading(true);
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+      const host = typeof window !== "undefined" && window.location.hostname ? window.location.hostname : "localhost";
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || `http://${host}:8000/api/v1`;
       const res = await fetch(`${baseUrl}/auth/google/start`);
       const data = await res.json();
       if (data?.data?.redirect_url) {
