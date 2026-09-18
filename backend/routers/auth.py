@@ -119,9 +119,30 @@ def logout(response: Response):
     return {"data": {"message": "Logged out successfully"}, "error": None}
 
 
+class BankSwitchRequest(BaseModel):
+    bank_id: str
+
+
+@router.post("/switch-bank")
+def switch_bank(req: BankSwitchRequest):
+    bank_id = req.bank_id
+    bank_name = "Govt. General Hospital Chennai" if bank_id == "TN-GGH-001" else "Apollo Hospitals Greams Road"
+    user_info = {
+        "sub": f"user-{bank_id.lower()}",
+        "email": f"officer@{bank_id.lower()}.in",
+        "name": f"Transfusion Officer ({bank_name})",
+        "role": "OFFICER",
+        "bank_id": bank_id,
+        "bank_name": bank_name,
+    }
+    token = create_access_token(user_info)
+    return {"data": {"token": token, "user": user_info}, "error": None}
+
+
 @router.get("/me")
 def me(current_user: dict = Depends(get_current_user)):
     return {
         "data": current_user,
         "error": None,
     }
+
