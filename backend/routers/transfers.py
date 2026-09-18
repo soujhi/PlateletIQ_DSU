@@ -103,24 +103,38 @@ def create_v2_transfer(
         created_by=current_user.get("sub", "demo-user"),
     )
 
+    facility_names = {
+        "TN-GGH-001": "Govt. General Hospital Chennai",
+        "TN-APO-014": "Apollo Hospitals Greams Road",
+        "TN-STA-002": "Govt. Stanley Medical College Hospital",
+        "TN-KMH-003": "Kilpauk Medical College Hospital",
+        "TN-MGM-005": "MGM Healthcare Adyar",
+        "TN-SIM-006": "MIOT International Hospital",
+        "TN-FOR-007": "Billroth Hospitals Shenoy Nagar",
+        "TN-SRM-008": "Govt. Omandurar Medical College Hospital",
+    }
+
+    src_name = facility_names.get(req.source_blood_bank_id, f"eRaktKosh Facility ({req.source_blood_bank_id})")
+    dest_name = facility_names.get(req.destination_blood_bank_id, f"eRaktKosh Facility ({req.destination_blood_bank_id})")
+
     transfer_record = {
         "id": transfer_id,
         "source_blood_bank_id": req.source_blood_bank_id,
-        "source_name": "Govt. General Hospital Chennai (TN-GGH-001)",
+        "source_name": f"{src_name} ({req.source_blood_bank_id})",
         "destination_blood_bank_id": req.destination_blood_bank_id,
-        "destination_name": "Apollo Hospitals Greams Road (TN-APO-014)",
+        "destination_name": f"{dest_name} ({req.destination_blood_bank_id})",
         "units": req.units,
         "component": req.component,
         "priority": req.priority,
-        "status": "PICKUP_PENDING",
+        "status": "REQUESTED",
         "state_lifecycle": [
             {"step": "REQUESTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "ACCEPTED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "UNITS_RESERVED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "SHIPMENT_CREATED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "AWB_ASSIGNED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "PICKUP_PENDING", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
-            {"step": "PICKUP_OTP_REQUIRED", "ts": datetime.datetime.utcnow().isoformat(), "done": True},
+            {"step": "ACCEPTED", "ts": None, "done": False},
+            {"step": "UNITS_RESERVED", "ts": None, "done": False},
+            {"step": "SHIPMENT_CREATED", "ts": None, "done": False},
+            {"step": "AWB_ASSIGNED", "ts": None, "done": False},
+            {"step": "PICKUP_PENDING", "ts": None, "done": False},
+            {"step": "PICKUP_OTP_REQUIRED", "ts": None, "done": False},
             {"step": "PICKUP_VERIFIED", "ts": None, "done": False},
             {"step": "IN_TRANSIT", "ts": None, "done": False},
             {"step": "ARRIVED", "ts": None, "done": False},
@@ -128,7 +142,8 @@ def create_v2_transfer(
             {"step": "DELIVERY_VERIFIED", "ts": None, "done": False},
             {"step": "TRANSFER_COMPLETED", "ts": None, "done": False},
         ],
-        "pickup_otp_code": pickup_otp,  # Transmitted to user for initial display
+        "pickup_otp_code": pickup_otp,
+        "delivery_otp_code": "123456",
         "eta_minutes": mapbox_info["duration_min"],
         "distance_km": mapbox_info["distance_km"],
         "route_geometry": mapbox_info["route_geometry"],
