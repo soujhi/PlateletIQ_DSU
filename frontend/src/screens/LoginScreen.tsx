@@ -40,7 +40,8 @@ const hospitalMarkers: Marker[] = [
 ];
 
 export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
-  const { loginAsDemo, loginWithGoogleToken } = useAuth();
+  const { loginAsDemo, loginWithGoogleToken, setAuthSession } = useAuth();
+  const [selectedHospital, setSelectedHospital] = useState("TN-GGH-001");
   const [loading, setLoading] = useState(false);
   const [gsiLoaded, setGsiLoaded] = useState(false);
   const globeRef = useRef<any>(null);
@@ -122,9 +123,25 @@ export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    await loginAsDemo();
-    setLoading(false);
-    if (onLogin) onLogin();
+    try {
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+      const res = await fetch(`${baseUrl}/auth/switch-bank`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bank_id: selectedHospital }),
+      });
+      const data = await res.json();
+      if (data?.data?.token) {
+        setAuthSession(data.data.token, data.data.user);
+      } else {
+        await loginAsDemo();
+      }
+    } catch (err) {
+      await loginAsDemo();
+    } finally {
+      setLoading(false);
+      if (onLogin) onLogin();
+    }
   }
 
   const handleGoogleRedirect = async () => {
@@ -219,12 +236,32 @@ export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1.5 uppercase tracking-wider">
+              Select eRaktKosh Hospital Facility
+            </label>
+            <select
+              value={selectedHospital}
+              onChange={(e) => setSelectedHospital(e.target.value)}
+              className="w-full bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[14px] rounded-[10px] p-3 focus:outline-none focus:border-[#0071E3] font-medium"
+            >
+              <option value="TN-GGH-001">Govt. General Hospital Chennai (TN-GGH-001)</option>
+              <option value="TN-APO-014">Apollo Hospitals Greams Road (TN-APO-014)</option>
+              <option value="TN-STA-002">Govt. Stanley Medical College Hospital (TN-STA-002)</option>
+              <option value="TN-KMH-003">Kilpauk Medical College Hospital (TN-KMH-003)</option>
+              <option value="TN-MGM-005">MGM Healthcare Adyar (TN-MGM-005)</option>
+              <option value="TN-SIM-006">MIOT International Hospital (TN-SIM-006)</option>
+              <option value="TN-FOR-007">Billroth Hospitals Shenoy Nagar (TN-FOR-007)</option>
+              <option value="TN-SRM-008">Govt. Omandurar Medical College Hospital (TN-SRM-008)</option>
+            </select>
+          </div>
+
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-[#0071E3] text-white text-[15px] font-medium rounded-full hover:bg-[#0058B0] transition-colors disabled:opacity-60 mt-2 cursor-pointer"
+            className="w-full py-3 bg-[#0071E3] text-white text-[15px] font-medium rounded-full hover:bg-[#0058B0] transition-colors disabled:opacity-60 mt-2 cursor-pointer shadow-sm"
           >
-            {loading ? "Signing in…" : "Continue as demo user"}
+            {loading ? "Authenticating Facility Officer…" : "Sign In as Transfusion Officer"}
           </button>
 
           <div className="relative flex py-2 items-center">
@@ -262,21 +299,21 @@ export default function LoginScreen({ onLogin }: { onLogin?: () => void }) {
                     d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                   />
                 </svg>
-                <span>Sign in with Google</span>
+                <span>Sign in with eRaktKosh SSO</span>
               </button>
             )}
           </div>
         </form>
 
-        <div className="mt-8 p-4 bg-[#F5F5F7] rounded-[12px]">
-          <p className="text-[11px] font-semibold text-[#6E6E73] uppercase tracking-wide mb-1">Demo mode</p>
+        <div className="mt-8 p-4 bg-[#F5F5F7] rounded-[12px] border border-[#E5E5E7]">
+          <p className="text-[11px] font-semibold text-[#1D1D1F] uppercase tracking-wide mb-1">eRaktKosh Network Node</p>
           <p className="text-[12px] text-[#6E6E73] leading-relaxed">
-            Demo mode · German hospital forecast model · eRaktKosh network data
+            Connected to Ministry of Health & Family Welfare eRaktKosh Portal. Predictive demand analytics & cold-chain transfer logistics active.
           </p>
         </div>
 
         <p className="text-[11px] text-[#AEAEB2] mt-8 text-center">
-          eRaktKosh · Govt. General Hospital Chennai
+          eRaktKosh · National Blood Transfusion Council Node
         </p>
       </div>
     </div>

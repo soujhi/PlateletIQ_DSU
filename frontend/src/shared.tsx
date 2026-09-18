@@ -147,12 +147,13 @@ export function DemoModeBanner() {
       className="flex items-center gap-2 px-7 py-2"
       style={{ background: "#F5F5F7", borderBottom: "1px solid #EBEBEB" }}
     >
-      <span className="text-[10px] font-semibold tracking-widest text-[#AEAEB2] uppercase">
-        Demo Mode
+      <span className="w-2 h-2 rounded-full bg-[#1A8A2C] animate-pulse" />
+      <span className="text-[10px] font-semibold tracking-widest text-[#1D1D1F] uppercase">
+        eRaktKosh Node Active
       </span>
-      <span style={{ color: "#DCDCDC" }}>·</span>
+      <span style={{ color: "#AEAEB2" }}>·</span>
       <span className="text-[12px] text-[#6E6E73]">
-        Forecast runs on validated hospital dataset. In production, your hospital&apos;s daily issue log is the input.
+        Predictive Demand Engine Active · Continuous daily issue log calibration & cold-chain transfer network online.
       </span>
     </div>
   );

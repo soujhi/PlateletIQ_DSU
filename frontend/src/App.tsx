@@ -153,23 +153,23 @@ function MainApp() {
           ))}
         </nav>
 
-        {/* Demo Mode toggle */}
+        {/* Operational State toggle */}
         <div className="px-4 py-4" style={{ borderTop: "1px solid #F0F0F0" }}>
           <p className="px-2 mb-2 text-[10px] font-semibold text-[#AEAEB2] uppercase tracking-widest">
-            Demo Mode
+            Operational Horizon
           </p>
           <div className="flex gap-1 rounded-[9px] p-0.5" style={{ background: "#F0F0F0" }}>
             {(["healthy", "watch"] as DemoState[]).map(d => (
               <button
                 key={d}
                 onClick={() => setDemo(d)}
-                className="flex-1 py-1.5 rounded-[7px] text-[12px] font-medium transition-colors capitalize"
+                className="flex-1 py-1.5 rounded-[7px] text-[12px] font-medium transition-colors cursor-pointer"
                 style={{
                   background: demo === d ? "#1D1D1F" : "transparent",
                   color: demo === d ? "white" : "#6E6E73",
                 }}
               >
-                {d.charAt(0).toUpperCase() + d.slice(1)}
+                {d === "healthy" ? "Normal" : "High Alert"}
               </button>
             ))}
           </div>

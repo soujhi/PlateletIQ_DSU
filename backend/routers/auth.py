@@ -123,13 +123,39 @@ class BankSwitchRequest(BaseModel):
     bank_id: str
 
 
+@router.get("/hospitals")
+def get_eraktkosh_hospitals():
+    """Returns curated list of eRaktKosh registered Chennai & regional hospitals."""
+    hospitals = [
+        {"id": "TN-GGH-001", "code": "30090", "name": "Govt. General Hospital Chennai", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Government", "latitude": 13.0827, "longitude": 80.2707, "sdp_units": 48, "rdp_units": 140},
+        {"id": "TN-APO-014", "code": "30099", "name": "Apollo Hospitals Greams Road", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Private Tertiary", "latitude": 13.0604, "longitude": 80.2496, "sdp_units": 14, "rdp_units": 42},
+        {"id": "TN-STA-002", "code": "30091", "name": "Govt. Stanley Medical College Hospital", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Government", "latitude": 13.1042, "longitude": 80.2872, "sdp_units": 19, "rdp_units": 85},
+        {"id": "TN-KMH-003", "code": "30092", "name": "Kilpauk Medical College Hospital", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Government", "latitude": 13.0789, "longitude": 80.2428, "sdp_units": 8, "rdp_units": 36},
+        {"id": "TN-MGM-005", "code": "30269", "name": "MGM Healthcare Adyar", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Private Specialty", "latitude": 13.0084, "longitude": 80.2571, "sdp_units": 22, "rdp_units": 60},
+        {"id": "TN-SIM-006", "code": "30173", "name": "MIOT International Hospital", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Private Multi-Specialty", "latitude": 13.0232, "longitude": 80.1873, "sdp_units": 16, "rdp_units": 50},
+        {"id": "TN-FOR-007", "code": "30301", "name": "Billroth Hospitals Shenoy Nagar", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Private Tertiary", "latitude": 13.0772, "longitude": 80.2268, "sdp_units": 11, "rdp_units": 30},
+        {"id": "TN-SRM-008", "code": "33125", "name": "Govt. Omandurar Medical College Hospital", "city": "Chennai", "district": "603", "state": "Tamil Nadu", "tier": "Government Super-Specialty", "latitude": 13.0678, "longitude": 80.2745, "sdp_units": 25, "rdp_units": 90},
+    ]
+    return {"data": hospitals, "error": None}
+
+
 @router.post("/switch-bank")
 def switch_bank(req: BankSwitchRequest):
     bank_id = req.bank_id
-    bank_name = "Govt. General Hospital Chennai" if bank_id == "TN-GGH-001" else "Apollo Hospitals Greams Road"
+    bank_names = {
+        "TN-GGH-001": "Govt. General Hospital Chennai",
+        "TN-APO-014": "Apollo Hospitals Greams Road",
+        "TN-STA-002": "Govt. Stanley Medical College Hospital",
+        "TN-KMH-003": "Kilpauk Medical College Hospital",
+        "TN-MGM-005": "MGM Healthcare Adyar",
+        "TN-SIM-006": "MIOT International Hospital",
+        "TN-FOR-007": "Billroth Hospitals Shenoy Nagar",
+        "TN-SRM-008": "Govt. Omandurar Medical College Hospital",
+    }
+    bank_name = bank_names.get(bank_id, f"eRaktKosh Facility ({bank_id})")
     user_info = {
-        "sub": f"user-{bank_id.lower()}",
-        "email": f"officer@{bank_id.lower()}.in",
+        "sub": f"officer-{bank_id.lower()}",
+        "email": f"officer@{bank_id.lower().replace('-', '')}.eraktkosh.in",
         "name": f"Transfusion Officer ({bank_name})",
         "role": "OFFICER",
         "bank_id": bank_id,
@@ -145,4 +171,5 @@ def me(current_user: dict = Depends(get_current_user)):
         "data": current_user,
         "error": None,
     }
+
 
