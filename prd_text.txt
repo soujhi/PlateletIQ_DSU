@@ -1,0 +1,963 @@
+
+--- PAGE 1 ---
+PlateletIQ
+Production PRD
+Antigravity Build Specification — 3-day window
+Full-stack: FastAPI · PostgreSQL · React · Vercel · Railway
+0. Ground truth — data and numbers
+1. Architecture decision
+2. Backend specification
+3. API contracts
+4. Frontend changes
+5. Screen-by-screen data audit
+6. Model integration
+7. eRaktKosh ingestion
+8. Decision engine
+9. Deployment
+10. Demo path
+11. Acceptance criteria
+
+--- PAGE 2 ---
+0. Ground Truth — Every Number in This Product
+The single source of truth for every data point Antigravity will use. No number appears in the product unless it is in this table.
+Metric
+Value
+Source
+Type
+MASE — PlateletIQ model
+0.734
+Notebook, rolling-origin validation on Aachen test s
+MODEL
+MASE — 7-day naive baseline
+0.993
+Computed: MAE(naive)/MAE(naive) on same test set
+MODEL
+MASE — published Schilling benchmark
+0.746
+Schilling et al., JMIR Med Inform 2022;10(2):e29978
+MODEL
+MAPE
+24.58%
+Notebook, same test set
+MODEL
+MAE
+5.303 units/day
+Notebook, same test set
+MODEL
+Training days
+4,018
+Aachen 2008-01-01 to 2018-12-31
+MODEL
+Wastage — baseline (no model)
+9.61%
+Simulator, alpha=13, naive forecast policy
+SIMULATED
+Wastage — PlateletIQ
+3.25%
+Simulator, alpha=13, LASSO forecast policy
+SIMULATED
+Shortage — baseline
+6.73%
+Simulator, same
+SIMULATED
+Shortage — PlateletIQ
+3.04%
+Simulator, same
+SIMULATED
+Simulator gate — wastage
+4.98% vs 4.93%
+Gate test vs Schilling published figures
+SIMULATED
+Simulator gate — shortage
+2.09% vs 2.02%
+Gate test vs Schilling published figures
+SIMULATED
+Shuffle test MASE
+1.127
+Labels shuffled; model degrades as expected (no leak
+MODEL
+Train/OOS gap
+19.8%
+Documented in notebook
+MODEL
+SDP share of metro platelet stock
+4.7%
+eRaktKosh scraper, 756 hospitals, 32 districts
+EXTERNAL
+Districts with zero SDP
+23 of 32
+eRaktKosh scraper, Sep 2026
+EXTERNAL
+Average data staleness
+170.6h
+eRaktKosh scraper, entrydate vs fetch time
+EXTERNAL
+Records over 24h stale
+32%
+eRaktKosh scraper
+EXTERNAL
+eRaktKosh offline flag
+Non-functional
+Returns 1 for every record — confirmed by measuremen
+EXTERNAL
+Bangladesh seasonal corr with India
++0.970
+WHO xMart API, 2018-2026
+EXTERNAL
+Sri Lanka seasonal corr with India
+-0.228
+WHO xMart API, same
+EXTERNAL
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 2
+
+--- PAGE 3 ---
+Metric
+Value
+Source
+Type
+India seasonal peak month
+October (M10)
+WHO India monthly dengue index
+EXTERNAL
+India peak/trough ratio
+12.4x
+WHO India monthly index M10/M4
+EXTERNAL
+November seasonal index
+1.83
+WHO India monthly index M11
+EXTERNAL
+Hospitals in scraper
+756
+eRaktKosh, 32 districts
+EXTERNAL
+Models tested in bake-off
+11
+Notebook: LASSO, Ridge, SARIMA, NN, GBM, RF, 7d-MA..
+MODEL
+Neural net MASE
+0.807
+Notebook bake-off, 120s training
+MODEL
+Random forest MASE
+0.859
+Notebook bake-off, 75x slower than LASSO
+MODEL
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 3
+
+--- PAGE 4 ---
+0B. Data Corrections — Fix Before Building Anything
+Seven specific errors found in the current UI by reading every line of code. Antigravity must correct all seven before connecting
+any API.
+CRITICAL
+AnalyticsScreen.tsx
+Problem: MASE baseline says 'vs 0.759 baseline'
+Fix: Change to 'vs 0.993 naive baseline'. 0.759 was the old model. 0.993 is the correct naive MASE computed from the data.
+CRITICAL
+AnalyticsScreen.tsx
+Problem: Benchmark table: Naïve MASE shown as 1.000
+Fix: Change to 0.993. MASE of exactly 1.000 is the theoretical definition; the actual computed value is 0.993.
+CRITICAL
+AnalyticsScreen.tsx
+Problem: Seasonal naïve row: MASE 0.891, wastage 3.63%
+Fix: Remove this row entirely or replace with the published Schilling benchmark (MASE 0.746). These numbers have no verified source.
+CRITICAL
+AnalyticsScreen.tsx
+Problem: Simulated outcomes: shortage 4 vs 11, over-procurement 6 vs 9
+Fix: Replace with validated numbers: wastage 9.61%%→3.25%%, shortage 6.73%%→3.04%%. The count-based figures are invented.
+CRITICAL
+CampPlanningScreen.tsx
+Problem: November seasonal index shown as 1.18
+Fix: Change to 1.83. Source: WHO xMart API, India monthly series, M11=1.83. The 1.18 figure has no source.
+HIGH
+AnalyticsScreen.tsx
+Problem: Forecast vs Actual chart label says 'last 9 months'
+Fix: This is hardcoded German test-set data, not rolling production data. Add ProvenanceBadge type='simulated' and label: 'German
+hospital test set · 804 days · 2017-2018'.
+MEDIUM
+ActionsScreen.tsx
+Problem: Confidence: High shown in evidence grid
+Fix: LASSO does not output confidence scores. Replace with: Inventory surplus: +41 units above safety stock.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 4
+
+--- PAGE 5 ---
+1. Architecture Decision
+3-day constraint. AI agent builder. Two real data sources. Every decision below is driven by this context — not best practice in the
+abstract.
+LOCKED
+Two-track data architecture
+German LASSO model → Forecast + Actions + Overview screens (labelled DEMO MODE).
+eRaktKosh scraper output → Network + Transfers screens (labelled EXTERNAL REFERENCE).
+These never mix. Model does not run on scraper data. Scraper data does not feed the decision engine.
+LOCKED
+Backend: FastAPI on Railway
+FastAPI Python 3.12. SQLite in development, PostgreSQL on Railway production. No ORM complexity beyond SQLAlchemy 2 Core
+for the 3-day window. Alembic migrations from day one — not retrofitted.
+LOCKED
+Auth: Google OAuth, stubbed for demo
+Google OAuth flow must be implemented. For hackathon demo, a single demo user is pre-seeded so judges do not have to create
+accounts. All API endpoints require auth header — no open endpoints except /health.
+LOCKED
+Frontend: existing UI, API-connected
+Do NOT redesign. Do NOT rewrite screens from scratch. Install TanStack Query, replace hardcoded arrays with useQuery hooks, add
+loading/error states. Every screen keeps its visual identity exactly.
+LOCKED
+Inventory: seeded demo data
+PlateletIQ does not have a live inventory feed from any Indian hospital. Seed one demo bank (Govt. General Hospital Chennai) with
+realistic platelet units. All seeded records carry demo_mode=true. UI shows DEMO DATA badge on inventory.
+LOCKED
+eRaktKosh: load from scraper CSV
+The student's scraper has produced eraktkosh.db with 6,183+ rows across 32 districts. On startup, the backend loads this as the
+external inventory snapshot. No live scraping in production — scraper runs separately and exports JSON for import.
+LOCKED
+Model: joblib file, adapter class
+plateletiq_model.joblib + model_adapter.py are the source of truth. Antigravity calls PlateletDemandModel.predict(history, dates). Do
+not recreate the feature pipeline. Do not retrain. Do not modify coefficients.
+LOCKED
+No Docker, no Kubernetes
+Vercel for frontend (automatic from git). Railway for backend (Procfile or railway.toml). Both deploy from the same monorepo. 3 days
+is not enough time to debug container builds.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 5
+
+--- PAGE 6 ---
+2. Backend Specification
+2.1 Repository Structure
+plateletiq/
+  backend/
+    main.py              # FastAPI app factory
+    auth.py              # Google OAuth + JWT session
+    database.py          # SQLAlchemy engine, session factory
+    models/
+      bank.py            # Bank, BankMembership
+      inventory.py       # InventoryUnit, InventoryEvent
+      forecast.py        # ForecastRun, Forecast, Recommendation
+      requisition.py     # Requisition, RequisitionEvent
+      transfer.py        # TransferOpportunity, TransferOffer
+      external.py        # ExternalSnapshot, ExternalInventoryRecord
+      audit.py           # AuditLog
+    routers/
+      auth.py            # /auth/*
+      inventory.py       # /banks/{id}/inventory/*
+      forecast.py        # /banks/{id}/forecast/*
+      recommendation.py  # /banks/{id}/recommendation/*
+      requisitions.py    # /banks/{id}/requisitions/*
+      transfers.py       # /banks/{id}/transfers/*
+      network.py         # /network/*
+      analytics.py       # /banks/{id}/analytics/*
+      camp.py            # /banks/{id}/camps/*
+      waste.py           # /banks/{id}/waste/*
+    ml/
+      model_adapter.py   # PlateletDemandModel class
+      plateletiq_model.joblib
+    services/
+      decision_engine.py # HOLD/PROCURE/COLLECT logic
+      freshness.py       # Freshness calculation
+      eraktkosh.py       # External snapshot loader
+    seed.py              # Demo data seeder
+    alembic/             # Migrations
+  frontend/src/          # Existing React app
+  railway.toml
+  vercel.json
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 6
+
+--- PAGE 7 ---
+2.2 Domain Models
+CORE ENTITIES — EVERY FIELD IS REQUIRED UNLESS MARKED OPTIONAL
+Bank
+id, name, code, city, state, district, timezone, latitude, longitude, active, created_at
+One row per blood bank. Demo bank: code=TN-GGH-001, name=Govt. General Hospital Chennai.
+BankMembership
+id, user_id, bank_id, role [TECHNICIAN|OFFICER|COMMITTEE|ADMIN], active
+A user may belong to multiple banks. Role is per-bank. Admin assigns roles.
+InventoryUnit
+id, bank_id, bag_id UNIQUE, component_type [RDP|SDP|UNKNOWN], blood_group, collection_at, 
+expiry_at, status [AVAILABLE|RESERVED|ISSUED|EXPIRED|DISCARDED|TRANSFER_PENDING|TRANSFERRED_OUT|NON_CLINICAL], source_type [OPERATIONAL|SEEDED], version
+Source of truth for PlateletIQ-owned units. version is an integer for optimistic locking.
+InventoryEvent
+id, unit_id, bank_id, event_type, actor_user_id, occurred_at, reason, metadata_json
+Immutable. Every status change produces an event. Never update or delete rows.
+ForecastRun
+id, bank_id, model_version, status [RUNNING|SUCCEEDED|FAILED], started_at, completed_at, h
+istory_end, history_days, error_message
+One row per model execution. Scheduled nightly. Failed runs do not overwrite last success.
+Forecast
+id, bank_id, forecast_run_id, forecast_date DATE, horizon_day INT, q50 FLOAT, q67 FLOAT, q
+90 FLOAT, model_version, generated_at
+One row per (forecast_run_id, forecast_date). 7 rows per run for 7-day horizon.
+Recommendation
+id, bank_id, forecast_run_id, action [HOLD|PROCURE|COLLECT], quantity INT, reason_summary,
+ drivers_json, created_at, expires_at, status [ACTIVE|CONFIRMED|ADJUSTED|EXPIRED|SUPERSEDED]
+One active recommendation per bank at any time. Confirmation creates RecommendationAction.
+Requisition
+id, bank_id, request_ref, ward, priority [ROUTINE|URGENT|EMERGENCY], clinical_indication, 
+platelet_count FLOAT, bleeding_status BOOL, units_requested INT, component_requested, status, concordance_flag BOOL, guideline_note, submitted_at
+No patient name, MRN, phone or address. Concordance flag set by decision engine on submit.
+TransferOpportunity
+id, source_bank_id, destination_bank_id, component_type, potential_quantity, source_freshn
+ess_hours FLOAT, destination_risk_score FLOAT, expiry_window_hours FLOAT, status [OPEN|REVIEWED|OFFERED|EXPIRED|CLOSED], created_at
+Derived from eRaktKosh snapshot + destination forecast. Recalculated on each snapshot import.
+ExternalSnapshot
+id, source TEXT, retrieved_at, parser_version, status, record_count
+One row per eRaktKosh import. Never mutated after creation.
+ExternalInventoryRecord
+id, snapshot_id, hospital_name, state, district, component_type, reported_quantity INT, so
+urce_entry_date, retrieved_at
+One row per hospital-component in the snapshot. source_entry_date from eRaktKosh entrydate field.
+AuditLog
+id, actor_user_id, bank_id, action, entity_type, entity_id, before_json, after_json, creat
+ed_at
+Immutable. Never allow UPDATE or DELETE on this table. All sensitive mutations log here.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 7
+
+--- PAGE 8 ---
+3. API Contracts
+All endpoints under /api/v1. All require Authorization: Bearer <token> header except /health and /auth/*. All responses use {data,
+meta, error} envelope.
+Auth
+GET
+/auth/google/start
+Redirect to Google OAuth
+GET
+/auth/google/callback
+Exchange code, return JWT, set secure cookie
+POST
+/auth/logout
+Clear session
+GET
+/me
+Current user + bank memberships + active role
+Inventory
+GET
+/banks/{bank_id}/inventory/summary
+Returns: available INT, expiring_today INT, expiring_1d INT, expiring_2d INT, expiring_3d INT, stale_external INT, last_sync ISO. Used by
+Overview and Inventory header strip.
+GET
+/banks/{bank_id}/inventory/units
+Query params: status, component_type, blood_group, expiry_band [TODAY|1D|2D|3D|4PLUS], page, limit. Returns paginated list. Sort
+default: expiry_at ASC (FIFO order).
+POST
+/banks/{bank_id}/inventory/units
+Register a new unit. Body: bag_id, component_type, blood_group, collection_at, expiry_at. Validates bag_id uniqueness. Creates
+InventoryEvent type=REGISTERED. Writes AuditLog.
+POST
+/banks/{bank_id}/inventory/units/{unit_id}/issue
+Body: requisition_id optional, fifo_override BOOL, override_reason TEXT. Transaction: lock unit, validate AVAILABLE, FIFO check (warn if
+newer than available older unit), update status=ISSUED, create IssueEvent, update Requisition, write AuditLog. Returns updated unit.
+POST
+/banks/{bank_id}/inventory/units/{unit_id}/dispose
+Body: pathway [DISCARD|NON_CLINICAL], reason TEXT. Creates WasteEvent. Updates unit status. Writes AuditLog.
+Forecast & Recommendation
+GET
+/banks/{bank_id}/forecast/latest
+Returns the latest SUCCEEDED ForecastRun with all 7 Forecast rows. If no succeeded run: {error: {code: FORECAST_NOT_AVAILABLE,
+last_attempt: ISO}}. Never return a stub or fallback without labelling it explicitly in the response.
+POST
+/banks/{bank_id}/forecast/runs
+Trigger a forecast run. Officer+ role only. Enqueues job, returns run_id. Scheduled runs happen nightly via ARQ; this endpoint is for manual
+trigger.
+GET
+/banks/{bank_id}/recommendation/current
+Returns the single ACTIVE recommendation for this bank. Includes: action, quantity, reason_summary, drivers (max 4), forecast_basis,
+inventory_basis, model_version, generated_at, expires_at. If no active recommendation: 404 with RECOMMENDATION_NOT_AVAILABLE.
+POST
+/banks/{bank_id}/recommendations/{id}/confirm
+Idempotency-key header required. Transaction: lock rec, verify ACTIVE, create RecommendationAction action=CONFIRM, update
+status=CONFIRMED, AuditLog. 409 if already confirmed by another user.
+POST
+/banks/{bank_id}/recommendations/{id}/adjust
+Body: quantity INT, reason TEXT (required). Creates RecommendationAction action=ADJUST. Updates status=ADJUSTED. AuditLog.
+Reason field is mandatory — 422 if missing.
+Requisitions
+GET
+/banks/{bank_id}/requisitions
+Query: status, priority, date_from, date_to, page, limit. Returns list with concordance_flag and guideline_note included.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 8
+
+--- PAGE 9 ---
+POST
+/banks/{bank_id}/requisitions
+Body: ward, priority, clinical_indication, platelet_count, bleeding_status, units_requested, component_requested. On create: run concordance
+check (platelet_count < 20 = concordant for prophylaxis; <50 with bleeding = concordant therapeutic; else flag for review). Set
+concordance_flag and guideline_note. Never block submission.
+POST
+/banks/{bank_id}/requisitions/{id}/fulfill
+Body: unit_ids list. Calls issue endpoint for each unit in FIFO order. Updates requisition status=FULFILLED or PARTIALLY_FULFILLED.
+Transaction across all units.
+Transfers
+GET
+/banks/{bank_id}/transfers/opportunities
+Returns all OPEN TransferOpportunity where destination_bank_id = bank_id. Each includes source freshness, expiry window, potential
+quantity, reason summary.
+POST
+/banks/{bank_id}/transfers/opportunities/{id}/offer
+Creates TransferOffer status=PENDING. Sets opportunity status=OFFERED. Body: quantity INT (must be <= potential_quantity). AuditLog. A
+transfer offer is not stock movement. Physical transfer requires completion endpoint.
+POST
+/banks/{bank_id}/transfers/offers/{id}/accept
+Source bank accepts. Sets offer status=ACCEPTED. Reserves source units. AuditLog.
+POST
+/banks/{bank_id}/transfers/offers/{id}/complete
+Transaction: mark source units TRANSFERRED_OUT, create destination units TRANSFERRED_IN, create events on both sides, update offer
+status=COMPLETED, AuditLog both banks. Recalculate recommendations for both banks.
+Network (eRaktKosh data)
+GET
+/network
+Returns latest ExternalSnapshot summary + per-district summary. Fields per district: district, state, sdp_units INT, pc_units INT, rdp_units INT,
+hospitals INT, avg_staleness_hours FLOAT, zero_sdp_hospitals INT, freshness_state [CURRENT|AGING|STALE|VERY_STALE]. Top-level:
+total_hospitals, sdp_pct FLOAT, zero_sdp_districts INT, snapshot_retrieved_at, avg_staleness_hours.
+GET
+/network/risks
+Returns districts with shortage risk and surplus opportunity, ready for transfer opportunity surface. Only return districts where staleness < 168h
+(VERY_STALE excluded from transfer suggestions).
+Analytics
+GET
+/banks/{bank_id}/analytics/forecast
+Returns: mase FLOAT, mape FLOAT, mae FLOAT, naive_mase FLOAT, model_version, training_dataset, training_days INT, test_days INT,
+wastage_simulated FLOAT, wastage_baseline FLOAT, shortage_simulated FLOAT, shortage_baseline FLOAT, shuffle_mase FLOAT,
+train_oos_gap FLOAT. ALL values come from the model artifact metadata — never compute live.
+GET
+/banks/{bank_id}/analytics/model-health
+Returns: model_version, last_run_at, last_succeeded_at, forecast_runs_7d INT, failed_runs_7d INT, india_calibrated BOOL (always false),
+limitations list.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 9
+
+--- PAGE 10 ---
+4. Frontend Changes
+Do not rewrite screens. Install three packages, add one API layer file, replace hardcoded arrays with useQuery hooks, add
+loading/error states. The visual design is preserved exactly.
+4.1 Packages to install
+@tanstack/react-query
+Server state management. All API calls go through this.
+axios
+HTTP client. One shared instance with auth header interceptor.
+@tanstack/react-query-devtools
+Development only. Helps debug cache states.
+4.2 New files to create
+src/api/client.ts
+Axios instance. Base URL from VITE_API_BASE_URL env. Request interceptor adds Authorization: Bearer <token> from
+localStorage. Response interceptor: on 401, clear token, redirect to /login.
+src/api/endpoints.ts
+One export per endpoint group: forecastApi, inventoryApi, recommendationApi, networkApi, analyticsApi, requisitionApi, transferApi.
+Each function returns a Promise with typed response.
+src/contexts/AuthContext.tsx
+Google OAuth state. user, token, bankId, role. Provides useAuth() hook. Redirects to /login if no token on protected routes.
+src/hooks/useInventorySummary.ts
+useQuery wrapper for /inventory/summary. staleTime: 60_000. Shows skeleton on loading.
+src/hooks/useForecast.ts
+useQuery for /forecast/latest. Returns typed forecast + model metadata.
+src/hooks/useRecommendation.ts
+useQuery for /recommendation/current. useMutation for confirm and adjust.
+src/hooks/useNetwork.ts
+useQuery for /network. Returns district summaries with freshness states.
+src/components/LoadingSkeleton.tsx
+Grey rounded rectangles at exact dimensions of content they replace. Never show zero while loading.
+src/components/ErrorState.tsx
+Standard error card: Cannot load [screen]. Try again button calls query.refetch().
+4.3 Environment variables
+VITE_API_BASE_URL=https://plateletiq-api.railway.app/api/v1
+VITE_GOOGLE_CLIENT_ID=Your Google OAuth client ID
+VITE_APP_ENV=production | development
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 10
+
+--- PAGE 11 ---
+4.4 Screen-by-screen API connection plan
+For each screen: what hardcoded data to replace, with what API call, what loading state to show, what error state to show.
+LoginScreen
+Replace isLoggedIn useState with AuthContext. Google button initiates OAuth flow. On callback, store JWT. Redirect to /overview.
+States: Loading: spinner on button only. Error: 'Account not authorized for PlateletIQ.'
+OverviewScreen
+Replace chartData array with useForecast(). Replace hardcoded 223/31/7 with useInventorySummary(). Replace 'HOLD' with
+useRecommendation().data.action. Why drawer: show actual drivers from recommendation.drivers_json.
+States: Loading: skeleton blocks at exact card heights. Error: show last known values with staleness note.
+InventoryScreen
+Replace hardcoded units with useInventoryUnits(). Shelf-life strip: compute from API summary (expiring_today, expiring_1d, expiring_2d,
+expiring_3d). Register unit form: POST /inventory/units. Issue button: POST /inventory/units/{id}/issue.
+States: Loading: skeleton table rows. Empty: 'No units registered. Register your first unit.'
+ForecastScreen
+Replace baseData with useForecast().data.forecast (7 rows q50/q67/q90). Chart: actual line from history in ForecastRun.history_end.
+Forecast line: q50. Band: q67/q90. Model card: useAnalytics().model_health.
+States: Loading: skeleton chart. Error: 'Forecast unavailable. Last successful: [timestamp].'
+ActionsScreen
+Replace HOLD with useRecommendation(). Confirm button: useMutation confirm. Adjust: useMutation adjust (requires reason). Transfer
+card: useTransferOpportunities().data[0] if exists.
+States: Loading: skeleton card. Error: 'Recommendation unavailable — using last known.'
+RequisitionsScreen
+Replace static list with useRequisitions(). New request form: POST /requisitions. concordance_flag from API response. Fulfill: POST
+/requisitions/{id}/fulfill.
+States: Loading: skeleton list. Empty: 'No requisitions today.'
+NetworkScreen
+Replace hardcoded hospital cards with useNetwork(). SDP scarcity card: computed from network.sdp_pct and
+network.zero_sdp_districts. Freshness badges: from per-district freshness_state.
+States: Loading: skeleton district grid. Stale: amber badge with hours. Very stale: red. Missing: 'No data returned — not the same as zero stock.'
+TransfersScreen
+Transfer opportunities: useTransferOpportunities(). Offer button: POST /transfers/opportunities/{id}/offer. At-risk units: from inventory
+(status=AVAILABLE, expiry within 24h).
+States: Loading: skeleton rows. Empty: 'No transfer opportunities identified.'
+AnalyticsScreen
+ALL metrics from useAnalytics().forecast. No computed values on frontend. Every number from model artifact metadata via API. Fix the 7
+data corrections from Section 0B.
+States: Loading: skeleton metric tiles. The chart uses German test-set data — label as SIMULATED.
+CampPlanningScreen
+Nov seasonal index: fix to 1.83 (from WHO India monthly). Demand range 3240-4120: keep as is (manual calculation is fine, just label
+SIMULATED). Bangladesh r=+0.970, Sri Lanka r=-0.228: keep as EXTERNAL.
+States: No API connection needed for camp planning in 3-day window. Label all values with provenance.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 11
+
+--- PAGE 12 ---
+5. Model Integration
+The model is trained. The adapter is written. Antigravity connects it to the FastAPI forecast router. Nothing else.
+5.1 What the model was trained on
+Dataset: RWTH Aachen University Hospital, Germany. 4,018 daily observations, 2008-01-01 to 2018-12-31.
+Source: Schilling et al., JMIR Med Inform 2022;10(2):e29978. Appendix 1 (medinform_v10i2e29978_app1.xlsx).
+Target variable: Transfused (daily platelet units issued). Target transform: sqrt(units). Inverse at inference.
+Split: 80% train (3,214 days, 2008-2014), 20% test (804 days, 2015-2018). Strictly temporal — no shuffling.
+Validation: Walk-forward (rolling-origin) cross-validation. 12 folds. No future data leaks into any fold.
+Algorithm: LASSO (L1 penalised linear regression). Alpha=0.01. 37 features, 20-21 active after regularisation.
+Active feature groups: day-of-week (weekend biggest negative), rolling averages, lag-2 and lag-21, trend, holiday.
+Leakage test: labels shuffled -> MASE degrades to 1.127. Confirms model learns real signal, not data artifacts.
+5.2 What the model does NOT do
+Does not predict demand for Indian hospitals. German-trained pattern is the proxy.
+Does not output blood-group-level forecasts. Demand is total units per day.
+Does not incorporate dengue signal in its features. Dengue drives the Camp Planning screen separately.
+Does not output a confidence score. The 'Confidence: High' in ActionsScreen is wrong — remove it.
+Does not adapt to drift automatically. Retraining requires a new CSV and a new run.
+5.3 Adapter interface — exact calling convention
+Backend calls the adapter exactly as follows. Antigravity must not alter this interface.
+from ml.model_adapter import PlateletDemandModel
+import pandas as pd
+# On startup — load once, keep in memory
+model = PlateletDemandModel(path='ml/plateletiq_model.joblib')
+# In forecast router — called by scheduled job
+async def run_forecast(bank_id: str, demand_history: list[dict]):
+    # demand_history: [{date: '2024-01-01', units_issued: 14}, ...]
+    series = pd.Series(
+        {pd.Timestamp(r['date']): float(r['units_issued']) for r in demand_history}
+    ).sort_index()
+    forecast_dates = [today + timedelta(days=i) for i in range(1, 8)]
+    result = model.predict(series, forecast_dates)
+    # result.forecast: [{date, q50, q67, q90}, ...]
+    # result.model_version, result.metadata, result.limitations
+    return result
+# Minimum history: 30 days. Recommended: 90+ days.
+# For demo: use the last 90 days of the German test set as seed history.
+5.4 Scheduled forecast job (ARQ)
+1. Load latest demand history for the bank (all InventoryEvent type=ISSUED, last 365 days).
+2. Validate: minimum 30 rows, no negatives, gaps < 14 days.
+3. Call model.predict(series, next_7_dates). Catch exceptions.
+4. Validate output: 7 rows, q50 values between 0 and 200.
+5. Persist ForecastRun (SUCCEEDED) + 7 Forecast rows in one transaction.
+6. Call decision_engine.generate_recommendation(bank_id, forecast_run_id).
+7. Supersede any previous ACTIVE recommendation for this bank.
+8. On failure: persist ForecastRun(FAILED, error_message). Do not touch last succeeded run.
+Default schedule: 05:00 local time daily. Officer can trigger manually via POST /forecast/runs.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 12
+
+--- PAGE 13 ---
+6. Decision Engine — HOLD / PROCURE / COLLECT
+This is the product differentiator. The model predicts demand. The decision engine turns demand + inventory into an action. Pure
+Python, deterministic, fully unit-testable.
+6.1 Inputs
+q50_7d
+Sum of q50 over 7 forecast days — the expected demand
+ q67_7d
+Sum of q67 over 7 days — the order-point (67th percentile)
+ usable_now
+Units with status=AVAILABLE and expiry_at > now
+ usable_by_day
+Units usable on each of the next 7 days (respects expiry — a unit expiring tonight is NOT usable on
+Tuesday)
+ pending_requisitions
+Units reserved for unfulfilled requests
+ safety_stock_alpha
+Configurable multiplier, default=13. Bank-specific.
+ lead_time_days
+Days until a procurement/collection arrives, default=2
+ no_delivery_days
+Set of weekdays with no delivery (e.g. Sat, Sun)
+6.2 Decision algorithm
+# Step 1 — Compute usable coverage per day
+for each day d in [today+1 .. today+7]:
+    usable_on_d = units where expiry_at > d AND status = AVAILABLE
+    demand_on_d = q50[d]
+    coverage_gap[d] = usable_on_d - demand_on_d
+# Step 2 — Find the first day coverage goes negative
+first_gap_day = min(d for d in days if coverage_gap[d] < safety_stock_floor)
+# safety_stock_floor = q67_7d * alpha / 7  (daily safety minimum)
+# Step 3 — Decision
+if all(coverage_gap[d] >= 0 for d in days):
+    action = HOLD
+    quantity = 0
+elif first_gap_day > today + lead_time_days:
+    # Gap exists but not urgent — standard procurement
+    action = PROCURE
+    quantity = ceil(q67_next_horizon - usable_net_of_expiry)
+else:
+    # Urgent — active collection (e.g. apheresis donors today)
+    action = COLLECT
+    quantity = ceil(immediate_deficit)
+# Step 4 — Check for transfer opportunity BEFORE returning PROCURE
+if action == PROCURE:
+    opportunities = get_open_transfer_opportunities(bank_id)
+    if opportunities and opportunities[0].potential_quantity >= quantity * 0.5:
+        # Surface transfer first — cheaper than fresh procurement
+        recommendation.transfer_opportunity = opportunities[0]
+# Step 5 — Build drivers (max 4, human-readable)
+drivers = compute_top_drivers(coverage_gap, expiry_risk, pending_reqs, seasonal_index)
+6.3 FIFO enforcement
+When issuing, always select the unit with the earliest expiry_at first.
+If a technician manually selects a unit and an older eligible unit exists: return 200 with a warning (do not block), require
+override_reason in the request.
+If override_reason is empty: return 422 FIFO_OVERRIDE_REQUIRED.
+Log fifo_override=true + reason in IssueEvent and AuditLog.
+Never allow two concurrent transactions to issue the same bag_id. Use SELECT FOR UPDATE on the unit row.
+6.4 Concordance check (requisitions)
+platelet_count < 20 x10^9/L, no active bleeding → CONCORDANT (prophylactic threshold, WHO Dengue §3.4)
+platelet_count < 50 x10^9/L, active_bleeding = true → CONCORDANT (therapeutic threshold)
+platelet_count < 50 x10^9/L, DIC_confirmed = true → CONCORDANT
+Anything outside the above → concordance_flag = false, guideline_note = 'Request falls outside WHO prophylactic (<20) and
+therapeutic (<50 with bleeding) thresholds. Review recommended.'
+The word 'inappropriate' must never appear in the UI or API response.
+Issue anyway is always available. The system never blocks a transfusion.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 13
+
+--- PAGE 14 ---
+7. eRaktKosh Data Pipeline
+The scraper runs separately. The backend ingests its output. These are the verified findings from the scraper that must appear in
+the product.
+7.1 What the scraper found — verified facts
+Metric
+Value
+Note
+Total hospitals covered
+756 across 32 districts
+eraktkosh.db, Sep 2026
+Total platelet stock (latest pass)
+7,547 units
+All three component types
+SDP share of all platelet stock
+4.7% (355 of 7,547)
+Component ID 14
+Districts with zero SDP
+23 of 32
+Includes: Kolkata, Delhi, Lucknow, Jaipur, W
+Rural tier SDP stock
+0 units
+11 rural districts, 23 hospitals, zero SDP
+Metro avg units/hospital
+9.80
+551 hospitals
+Rural avg units/hospital
+5.83
+23 hospitals
+Average data staleness
+170.6 hours (7.1 days)
+entrydate vs fetch time, IST conversion appl
+Worst case staleness
+4,390.5 hours (183 days)
+One hospital last updated Sep 2025
+Records over 24h stale
+32% (722 of 2,259)
+Latest pass
+eRaktKosh offline flag
+Returns '1' for ALL reco
+Not a functional availability signal — confi
+Component ID 14
+Single Donor Platelet (S
+Confirmed by probing all IDs 1-40
+Component ID 20
+Platelet Concentrate (PC
+Confirmed
+Component ID 23
+Random Donor Platelets (
+Confirmed
+Top stockholders
+Tata Medical, Narayana H
+All cancer centres
+Warangal, TG
+0 units across all 3 com
+Confirmed zero, not missing data
+Kolkata (WB d342)
+0 SDP across 28 hospital
+Held in 2 independent passes
+7.2 Import flow
+Backend exposes POST /banks/{id}/data/eraktkosh/import. Body: JSON from scraper.
+Validate JSON structure: array of objects with hospitalname, hospitalCode, entrydate, offline, hospitalType, components dict.
+Parse each record. Map component keys: 'Single Donor Platelet' → SDP, 'Platelet Concentrate' → PC, 'Random Donor Platelets' →
+RDP. Unknown: UNKNOWN.
+For each record: compute staleness_hours = (fetch_time_IST - entrydate_IST).total_seconds() / 3600.
+Create ExternalSnapshot row. Insert ExternalInventoryRecord rows in one transaction.
+After import: recalculate TransferOpportunity table. Delete OPEN opportunities older than 24h. Create new opportunities where:
+source has sdp_units > 5 AND staleness < 72h AND destination has projected shortage (from active recommendation).
+CRITICAL: source_entry_date (entrydate from eRaktKosh) is stored separately from retrieved_at (when PlateletIQ fetched it).
+Freshness is computed from source_entry_date, NOT retrieved_at.
+CRITICAL: offline field from eRaktKosh returns 1 for every record. Do not use it. Freshness state is the only staleness signal.
+7.3 Freshness states
+CURRENT
+0 to 24 hours · Source updated within the last day
+ AGING
+24 to 72 hours · Hospital may not have updated since yesterday
+ STALE
+72 to 168 hours (3-7 days) · Data is likely outdated for clinical decisions
+ VERY_STALE
+>168 hours (>7 days) · Do not use for transfer suggestions
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 14
+
+--- PAGE 15 ---
+8. Deployment
+Vercel for frontend. Railway for backend + PostgreSQL + Redis. No Docker required. Deploy from git. Both live on shared
+monorepo.
+Frontend — Vercel
+Connect GitHub repo to Vercel. Set root directory: frontend/.
+Build command: pnpm build. Output dir: dist.
+Environment variables: VITE_API_BASE_URL, VITE_GOOGLE_CLIENT_ID, VITE_APP_ENV.
+Add vercel.json: {"rewrites": [{"source": "/(.*)", "destination": "/index.html"}]}
+All routes return index.html for React Router. This is required.
+Backend — Railway
+New Railway project. Add Python service. Connect same GitHub repo.
+Root directory: backend/. Start command: uvicorn main:app --host 0.0.0.0 --port $PORT
+Add PostgreSQL plugin. Railway auto-injects DATABASE_URL.
+Add Redis plugin. Railway auto-injects REDIS_URL.
+Environment variables: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, JWT_SECRET (random
+32 chars), CORS_ORIGINS (Vercel URL), MODEL_PATH=ml/plateletiq_model.joblib.
+On first deploy: run alembic upgrade head. Then python seed.py --env demo.
+worker.py runs the ARQ worker for scheduled jobs. Add as second Railway service.
+Google OAuth setup
+Google Cloud Console → APIs → OAuth 2.0 → Create credentials.
+Authorized redirect URIs: https://your-backend.railway.app/api/v1/auth/google/callback
+Authorized JS origins: https://your-app.vercel.app
+GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET → Railway environment.
+VITE_GOOGLE_CLIENT_ID → Vercel environment.
+CORS configuration
+Backend CORS origins: [VITE_APP_URL from Vercel, localhost:5173 for dev].
+Allow credentials: true. Allow headers: Authorization, Content-Type.
+Never use CORS allow_origins=['*'] in production.
+Database migrations
+alembic init alembic. Configure alembic.ini with DATABASE_URL from env.
+alembic revision --autogenerate -m 'initial'. alembic upgrade head.
+Each schema change = new migration. Never modify existing migrations.
+Health check
+GET /api/v1/health returns: {api: ok, database: ok|error, redis: ok|error, model: ok|error, latest_forecast: ISO|null}.
+Railway uses this for health checks. Vercel uses /index.html.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 15
+
+--- PAGE 16 ---
+9. Demo Path & Seed Data
+The exact 8-screen sequence a judge will see. Every number they see must come from the API. Every API call must return a
+value. No screen is allowed to show a spinner during a live demo.
+9.1 Seed data specification
+Demo bank:
+name=Govt. General Hospital Chennai, code=TN-GGH-001, city=Chennai, state=Tamil Nadu,
+district=603
+ Demo user:
+email=demo@plateletiq.dev, role=OFFICER. Pre-authorised so judges skip OAuth. Demo login:
+click 'Continue as demo user' button (visible only in APP_ENV=demo).
+ Demand history:
+180 rows of synthetic demand. Mean=26 units/day (Indian hospital scale). Weekday 28, weekend
+12. Gaussian noise std=4. Covers last 180 days from seed_date. Stored as InventoryEvent
+type=ISSUED (source_type=SEEDED).
+ Forecast:
+Run model on seed demand history. 7 days forward. Persist as ForecastRun SUCCEEDED + 7
+Forecast rows. MASE shown from model metadata (0.734).
+ Recommendation:
+Run decision engine on seed forecast. Expected: HOLD (inventory covers demand). Or set initial
+inventory to 180 units and procurement needed in 5 days (PROCURE state).
+ Inventory units:
+48 seeded units. Distribution: 9 expiring today, 14 in 1 day, 13 in 2 days, 12 in 3 days. Mix of RDP
+(80%%) and SDP (20%%). All bags prefixed DEMO-.
+ Requisitions:
+3 seeded: 1 concordant (platelet_count=12), 1 flagged (platelet_count=45, no bleeding), 1
+completed. Timestamps from today.
+ Transfer opportunities:
+2 seeded from eRaktKosh data: Bangalore Urban → Chennai (60 SDP units, freshness=AGING),
+Mumbai → Chennai (25 SDP units, freshness=CURRENT).
+ eRaktKosh snapshot:
+Load from eraktkosh.db scraper output. 32 districts, 756 hospitals, Sep 2026 snapshot. Staleness
+computed on load.
+9.2 Demo path — 8 screens, 4 minutes
+1
+Login
+Globe animation. 'Continue as demo user' button. Instant. Bank: Govt. General Hospital Chennai. Role: Officer. Judge sees the globe
+with amber/red pins on real Indian cities.
+2
+Overview
+PROCURE 18 in amber. Status: WATCH. Three stat tiles: 48 units / 26 expected / 7 days. Chart: 6 days actual (solid black) + 3 days
+forecast (dashed blue). Transfer card above recommendation: Bangalore → Chennai. Tap Why → drawer shows 4 drivers from
+decision engine.
+3
+Inventory
+Shelf-life strip: red band Today=9, amber 1d=14, 2d=13, 3d=12. Table sorted by expiry ascending. 'DEMO DATA' badge in top right.
+Tap any row → unit drawer with bag_id, expiry_at, status, source=PlateletIQ Demo.
+4
+Forecast
+7-day chart with uncertainty band. Weekend columns greyed. Friday is highest (elective procedures). Model card: LASSO v1.4, MASE
+0.734, 4,018 training days. Demo Mode banner at top. Model details drawer: German data note, India limitations.
+5
+Actions
+PROCURE 18 in amber. Transfer card first (Bangalore → 12 units). 'Review transfer →' button. Below: confirm/adjust recommendation.
+Tap Review action → evidence drawer: 4 steps (inventory, forecast, safety buffer, net position).
+6
+Requisitions
+List: ICU concordant (green), Ward 4B flagged (amber). Tap flagged: platelet_count=45, no bleeding, WHO threshold note. Issue
+anyway is primary button. 'Review recommended' is secondary. Never blocked.
+7
+Network
+SDP scarcity card: 4.7%, 23/32 districts zero. Pulse dot, 'EXTERNAL REFERENCE'. District grid: Warangal shows 0 all components
+(red), Bangalore shows 60 SDP (amber). Freshness badges: some green, some red. Average staleness: 170.6h.
+8
+Analytics
+Three tiles: 3.25% (green) / 0.734 (blue) / 4,018 (grey). Benchmark table: PlateletIQ 0.734 vs Naive 0.993 vs Published 0.746. German
+test set chart with SIMULATED badge. Model transparency: all 4 rows with correct data.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 16
+
+--- PAGE 17 ---
+10. Acceptance Criteria
+A feature is done only when every row in its AC row is checked. Visual appearance alone is not acceptance. 'It works on my
+machine' is not acceptance.
+Auth
+✓
+AC-001: Demo user login works without Google OAuth (APP_ENV=demo only).
+✓
+AC-002: Real Google OAuth works. Unauthorized account shows error, not the app.
+✓
+AC-003: JWT expiry forces re-login without data loss from previous session.
+✓
+AC-004: Refreshing the browser preserves auth state and does not reset to login.
+Data correctness
+✓
+AC-010: Analytics MASE shows 0.734 vs 0.993 (not 0.759, not 1.000).
+✓
+AC-011: Analytics wastage shows 3.25% vs 9.61% (not vs 3.81%).
+✓
+AC-012: Camp Planning November seasonal index shows 1.83 (not 1.18).
+✓
+AC-013: Actions screen has no 'Confidence' metric (LASSO does not output confidence).
+✓
+AC-014: Analytics chart is labelled 'German hospital test set · SIMULATED' (not 'last 9 months').
+✓
+AC-015: Seasonal naive benchmark row is removed or replaced with Schilling published MASE 0.746.
+✓
+AC-016: Simulated outcomes show shortage 4 vs 11 is removed; use 3.04% vs 6.73%.
+Inventory
+✓
+AC-020: Registering a unit creates exactly one InventoryUnit and one InventoryEvent.
+✓
+AC-021: Issuing a unit when an older unit exists triggers a FIFO warning in the response.
+✓
+AC-022: FIFO override requires a non-empty reason string — 422 without it.
+✓
+AC-023: Two concurrent issue requests for the same unit: one succeeds, one gets 409.
+✓
+AC-024: Inventory summary updates after issue without page reload (TanStack Query invalidation).
+✓
+AC-025: Shelf-life strip widths are proportional to unit counts from the API.
+Forecast & Recommendation
+✓
+AC-030: Forecast endpoint returns 7 rows with q50/q67/q90 from the real model.
+✓
+AC-031: Forecast chart renders actual+forecast lines from API data, not hardcoded arrays.
+✓
+AC-032: Recommendation action is HOLD, PROCURE or COLLECT — never another value.
+✓
+AC-033: Confirm recommendation is transactional. Two concurrent confirms: one 409.
+✓
+AC-034: Adjust requires non-empty reason. Confirmed without reason: 422.
+✓
+AC-035: Forecast failure shows 'Forecast unavailable. Last successful: [ISO]' — not a fake value.
+eRaktKosh / Network
+✓
+AC-040: Network screen SDP scarcity card shows 4.7% and 23/32 from real scraper data.
+✓
+AC-041: Freshness is computed from source_entry_date, not retrieved_at.
+✓
+AC-042: eRaktKosh offline flag is never displayed in the UI (it is non-functional).
+✓
+AC-043: Zero stock (0 units confirmed) and no-data (no record returned) are distinct UI states.
+✓
+AC-044: Districts with staleness > 168h do not appear as transfer sources.
+Transfers
+✓
+AC-050: Transfer offer is not stock movement — status=OFFERED until explicitly completed.
+✓
+AC-051: Complete transfer: source units decrease, destination units increase, both audited.
+✓
+AC-052: Expired transfer offers (past expires_at) do not appear in opportunities list.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 17
+
+--- PAGE 18 ---
+No forbidden patterns
+✓
+AC-060: No hardcoded operational number survives in any connected screen.
+✓
+AC-061: No API call returns a fallback/mock value silently — failures are explicit.
+✓
+AC-062: No screen shows zero while loading — skeleton states replace content.
+✓
+AC-063: DEMO DATA badge is visible on any screen showing seeded data.
+✓
+AC-064: MODEL badge is visible on any number derived from the ML model.
+✓
+AC-065: EXTERNAL REFERENCE badge is visible on any eRaktKosh-derived number.
+✓
+AC-066: india_calibrated=false is always true in model metadata response.
+Deployment
+✓
+AC-070: GET /api/v1/health returns 200 with all component statuses.
+✓
+AC-071: Vercel frontend loads without console errors.
+✓
+AC-072: Railway backend restarts survive without data loss (PostgreSQL persists).
+✓
+AC-073: A new judge opening the Vercel URL can log in as demo user in under 30 seconds.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 18
+
+--- PAGE 19 ---
+11. Critical DO NOT Build List
+Antigravity must not build these. Each one is a time sink with no demo value. 3 days does not allow any of them.
+✕  RBAC enforcement beyond demo/officer
+All seeded demo users are OFFICER. Implement role check middleware but do not build admin user management UI in 3 days.
+✕  Email notifications
+Not needed for a judge demo. In-app state is sufficient.
+✕  PDF report generation
+Mention in demo: 'Reports export to PDF via backend job — available post-hackathon'. Do not implement.
+✕  Camp creation workflow
+Camp Planning screen is read-only for demo. The 6-month outlook and assumptions are sufficient. Do not implement
+create/approve/complete lifecycle.
+✕  Patient identifiers
+No MRN, no patient name, no phone number — anywhere in the stack.
+✕  Live eRaktKosh scraping
+Scraper is a separate process. Backend only imports its output JSON. Do not wire the scraper into the FastAPI server.
+✕  Retrain the model
+plateletiq_model.joblib is the artifact. Do not recreate it. Do not modify coefficients. Do not run scikit-learn training in the API.
+✕  Blood-group-level forecasting
+The model does not support it. Do not add it.
+✕  Docker/Kubernetes
+Vercel + Railway natively. No containers needed.
+✕  Websockets / real-time push
+TanStack Query polling is sufficient for a demo.
+✕  Donor-facing features
+PlateletIQ is a blood bank operations tool. No donor registration, no donor portal, no donor SMS.
+✕  Patient treatment advice
+Never. Not now, not post-hackathon. The product is decision support for blood bank technicians. Requisition concordance flags are
+administrative workflow, not clinical advice.
+The final acceptance criterion is not 'the UI looks correct.'
+Every visible number has a source. Every action has a real state transition.
+Refreshing the browser does not lose operational state.
+PlateletIQ — Production PRD · Antigravity Build Spec
+Page 19
