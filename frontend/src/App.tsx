@@ -12,6 +12,7 @@ import NetworkScreen from "./screens/NetworkScreen";
 import WasteRecoveryScreen from "./screens/WasteRecoveryScreen";
 import CampPlanningScreen from "./screens/CampPlanningScreen";
 import DataUploadScreen from "./screens/DataUploadScreen";
+import TransferTrackingScreen from "./screens/TransferTrackingScreen";
 import { Drawer, SectionLabel } from "./shared";
 
 const queryClient = new QueryClient({
@@ -25,7 +26,8 @@ const queryClient = new QueryClient({
 
 type Screen =
   | "overview" | "forecast" | "inventory" | "actions" | "analytics"
-  | "transfers" | "network" | "waste" | "camp" | "upload";
+  | "transfers" | "tracking" | "network" | "waste" | "camp" | "upload";
+
 
 type DemoState = "healthy" | "watch";
 
@@ -86,12 +88,14 @@ function MainApp() {
       case "actions":   return <ActionsScreen />;
       case "analytics": return <AnalyticsScreen />;
       case "transfers": return <TransfersScreen />;
+      case "tracking":  return <TransferTrackingScreen />;
       case "network":   return <NetworkScreen />;
       case "waste":     return <WasteRecoveryScreen />;
       case "camp":      return <CampPlanningScreen />;
       case "upload":    return <DataUploadScreen />;
     }
   }
+
 
   const currentDateStr = new Date().toLocaleDateString("en-IN", {
     weekday: "long",
