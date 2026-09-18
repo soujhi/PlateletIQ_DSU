@@ -6,6 +6,9 @@ from models.config import SystemConfig
 DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "AT_RISK_H": {"value": "48", "unit": "hours", "description": "At-risk pool entry window"},
     "MIN_RESIDUAL_MIN": {"value": "360", "unit": "minutes", "description": "Minimum usable life on arrival"},
+    "MIN_RESIDUAL_HOURS": {"value": "6.0", "unit": "hours", "description": "Minimum usable life on arrival in hours"},
+    "MAX_TRANSIT_MINUTES": {"value": "120", "unit": "minutes", "description": "Maximum transit duration ceiling"},
+    "PLATELET_EXPIRE_DAYS": {"value": "5", "unit": "days", "description": "Platelet shelf life shelf window"},
     "HANDLING_MIN": {"value": "20", "unit": "minutes", "description": "Pack-out and receive overhead"},
     "URGENCY_TAU": {"value": "12", "unit": "hours", "description": "Urgency decay constant"},
     "ABO_SUBSTITUTE_PENALTY": {"value": "0.85", "unit": "ratio", "description": "Preference for exact blood group"},
@@ -20,7 +23,7 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "MAX_AGITATION_OFF_MIN": {"value": "1440", "unit": "minutes", "description": "Regulatory transport window without agitation"},
     "CREDIT_TTL_DAYS": {"value": "90", "unit": "days", "description": "Credit balance expiry"},
     "UNIT_COST_INR": {"value": "3000", "unit": "₹", "description": "Wastage unit valuation"},
-    "TRANSPORT_PROVIDER": {"value": "porter", "unit": "enum", "description": "Active provider: porter | internal | beckn"},
+    "TRANSPORT_PROVIDER": {"value": "shiprocket", "unit": "enum", "description": "Active provider: shiprocket | porter | internal | beckn"},
     "DEMO_MODE": {"value": "true", "unit": "bool", "description": "Enables simulation clock"},
 }
 

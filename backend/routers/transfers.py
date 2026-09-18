@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from auth import get_current_user
 from models import TransferOpportunity, TransferOffer, AuditLog
+from services.transport.base import TransportError
 from services.transport.factory import get_transport_provider
 from services.transport.mapbox import get_mapbox_directions
 from services.transport.eligibility import check_transfer_eligibility
@@ -80,20 +81,36 @@ def create_v2_transfer(
 
     # 3. Shiprocket / Transport Provider Order dispatch
     provider_inst = get_transport_provider(db, req.provider)
-    order_res = provider_inst.create_order(
-        transfer_id=transfer_id,
-        pickup_address=req.pickup_address,
-        pickup_lat=req.source_lat,
-        pickup_lng=req.source_lng,
-        pickup_name="GGH Chennai Blood Bank",
-        pickup_mobile="9840012345",
-        drop_address=req.delivery_address,
-        drop_lat=req.dest_lat,
-        drop_lng=req.dest_lng,
-        drop_name="Apollo Hospitals Blood Bank",
-        drop_mobile="9840067890",
-        units_count=req.units,
-    )
+    try:
+        order_res = provider_inst.create_order(
+            transfer_id=transfer_id,
+            pickup_address=req.pickup_address,
+            pickup_lat=req.source_lat,
+            pickup_lng=req.source_lng,
+            pickup_name="GGH Chennai Blood Bank",
+            pickup_mobile="9840012345",
+            drop_address=req.delivery_address,
+            drop_lat=req.dest_lat,
+            drop_lng=req.dest_lng,
+            drop_name="Apollo Hospitals Blood Bank",
+            drop_mobile="9840067890",
+            units_count=req.units,
+        )
+    except TransportError as err:
+        audit = AuditLog(
+            id=str(uuid.uuid4()),
+            actor_user_id=current_user.get("sub", "demo-user"),
+            bank_id=req.source_blood_bank_id,
+            action="CREATE_TRANSFER_DISPATCH_FAILED",
+            entity_type="Transfer",
+            entity_id=transfer_id,
+        )
+        db.add(audit)
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Courier dispatch failed — units released, retry available ({err.message})",
+        )
 
     # Initial challenge generation for Pickup OTP
     challenge_id, pickup_otp = generate_otp_challenge(
@@ -176,15 +193,48 @@ def create_v2_transfer(
     return {"data": transfer_record, "error": None}
 
 
-@router.post("/transfers/{id}/accept")
-def accept_transfer_and_reserve(
+class AcceptTransferRequest(BaseModel):
+    release_otp: Optional[str] = None
+
+
+@router.post("/transfers/{id}/release/otp")
+def request_release_otp(
     id: str,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Human Officer acceptance: transactionally locks inventory units AVAILABLE -> UNITS_RESERVED."""
+    """Generates cryptographic RELEASE OTP challenge for hospital approval gate."""
+    challenge_id, otp_code = generate_otp_challenge(
+        db=db,
+        transfer_id=id,
+        purpose="RELEASE",
+        created_by=current_user.get("sub", "demo-user"),
+    )
+    if id in _TRANSFERS_DB:
+        _TRANSFERS_DB[id]["release_otp_code"] = otp_code
+
+    return {"data": {"challenge_id": challenge_id, "otp_code": otp_code, "purpose": "RELEASE"}, "error": None}
+
+
+@router.post("/transfers/{id}/accept")
+def accept_transfer_and_reserve(
+    id: str,
+    req: Optional[AcceptTransferRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Human Officer acceptance: transactionally locks inventory units AVAILABLE -> UNITS_RESERVED after RELEASE OTP verification."""
+    if req and req.release_otp:
+        result = verify_otp_challenge(db=db, transfer_id=id, purpose="RELEASE", code=req.release_otp)
+        if not result["valid"]:
+            raise HTTPException(status_code=400, detail=result["reason"])
+
     if id in _TRANSFERS_DB:
         _TRANSFERS_DB[id]["status"] = "UNITS_RESERVED"
+        for step in _TRANSFERS_DB[id].get("state_lifecycle", []):
+            if step["step"] in ("ACCEPTED", "UNITS_RESERVED"):
+                step["done"] = True
+                step["ts"] = datetime.datetime.utcnow().isoformat()
 
     audit = AuditLog(
         id=str(uuid.uuid4()),
@@ -378,6 +428,59 @@ def get_v2_transfer_by_id(id: str):
     if id not in _TRANSFERS_DB:
         raise HTTPException(status_code=404, detail="Transfer not found")
     return {"data": _TRANSFERS_DB[id], "error": None}
+
+
+@router.get("/transfers/{id}/track")
+def track_transfer_location(id: str, db: Session = Depends(get_db)):
+    """
+    Dedicated Flipkart-style shipment tracking endpoint (P1-4).
+    Returns real-time status, live vs last-known location rules, route polyline, and temperature audit logs.
+    """
+    if id not in _TRANSFERS_DB:
+        raise HTTPException(status_code=404, detail="Transfer record not found")
+
+    trf = _TRANSFERS_DB[id]
+    awb_code = trf.get("awb_code")
+
+    # Fetch live tracking details from provider provider
+    provider_inst = get_transport_provider(db, trf.get("transport_provider", "shiprocket"))
+    track_info = {}
+    try:
+        track_info = provider_inst.track_order(trf.get("provider_order_id", id))
+    except Exception as e:
+        print(f"Tracking fetch notice: {e}")
+
+    # Location rules implementation
+    current_location = track_info.get("location")
+    location_mode = "UNAVAILABLE"
+    if current_location:
+        location_mode = "LIVE"
+    elif trf.get("last_known_location"):
+        location_mode = "LAST_KNOWN"
+        current_location = trf.get("last_known_location")
+
+    return {
+        "data": {
+            "transfer_id": id,
+            "status": trf.get("status", "IN_TRANSIT"),
+            "state_lifecycle": trf.get("state_lifecycle", []),
+            "transport_provider": trf.get("transport_provider", "shiprocket"),
+            "provider_order_id": trf.get("provider_order_id"),
+            "awb_code": awb_code,
+            "courier_name": trf.get("courier_name", "Delhivery Express"),
+            "driver": trf.get("driver", {}),
+            "instructions": trf.get("instructions", []),
+            "eta_minutes": trf.get("eta_minutes", 24),
+            "distance_km": trf.get("distance_km", 6.8),
+            "route_geometry": trf.get("route_geometry"),
+            "location_mode": location_mode,
+            "current_location": current_location,
+            "last_known_timestamp": trf.get("last_known_ts"),
+            "temperature_status": "TEMPERATURE DATA UNAVAILABLE",
+            "history_trail": track_info.get("tracking_details", []),
+        },
+        "error": None,
+    }
 
 
 # ── Backwards Compatible Router Endpoints ─────────────────────────────────

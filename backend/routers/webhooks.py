@@ -1,3 +1,4 @@
+import os
 import hashlib
 import json
 import datetime
@@ -8,19 +9,27 @@ from models.shipment import Shipment, TrackingEvent
 from models.audit import AuditLog
 
 webhooks_router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+SHIPROCKET_WEBHOOK_TOKEN = os.getenv("SHIPROCKET_WEBHOOK_TOKEN", "")
 
 
 @webhooks_router.post("/shiprocket")
+@webhooks_router.post("/logistics-events")
 async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
     """
-    Shiprocket tracking webhook listener with payload hash deduplication (Section 13 & 14).
+    Shiprocket & logistics tracking webhook listener with payload hash deduplication (P1-3).
+    Verifies x-shiprocket-secret or x-webhook-token header if configured.
     Normalizes provider status updates and persists immutable TrackingEvent logs.
     """
+    if SHIPROCKET_WEBHOOK_TOKEN:
+        token_header = request.headers.get("x-shiprocket-secret") or request.headers.get("x-webhook-token")
+        if token_header != SHIPROCKET_WEBHOOK_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid or missing webhook signature token.")
+
     body = await request.body()
     payload_hash = hashlib.sha256(body).hexdigest()
 
     try:
-        data = json.loads(body.decode("utf-8"))
+        data = json.loads(body.decode("utf-8")) if body else {}
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload.")
 
