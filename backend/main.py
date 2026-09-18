@@ -15,6 +15,7 @@ from routers import (
     network_router,
     analytics_router,
     camp_router,
+    transport_router,
 )
 
 # Create database tables
@@ -23,7 +24,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(
     title="PlateletIQ API",
     description="Backend API for PlateletIQ Blood Bank Inventory & Demand Forecasting Platform",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # Request duration logging middleware
@@ -64,6 +65,7 @@ app.include_router(transfers_router, prefix=API_PREFIX)
 app.include_router(network_router, prefix=API_PREFIX)
 app.include_router(analytics_router, prefix=API_PREFIX)
 app.include_router(camp_router, prefix=API_PREFIX)
+app.include_router(transport_router, prefix=API_PREFIX)
 
 
 from sqlalchemy import text
@@ -108,12 +110,15 @@ def health_check():
 
 @app.on_event("startup")
 def startup_event():
-    # Automatically seed demo bank and inventory if database is fresh
+    # Automatically seed demo bank, inventory, and system config if fresh
     try:
         from seed import seed_demo_data
+        from services.config_service import init_default_config
         db = SessionLocal()
         seed_demo_data(db)
+        init_default_config(db)
         db.close()
     except Exception as e:
         print(f"Startup seed notice: {e}")
+
 

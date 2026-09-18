@@ -5,6 +5,7 @@ from models.requisition import Requisition
 from models.transfer import TransferOpportunity, TransferOffer
 from models.external import ExternalSnapshot, ExternalInventoryRecord
 from models.audit import AuditLog
+from models.config import SystemConfig
 
 __all__ = [
     "Bank",
@@ -20,4 +21,6 @@ __all__ = [
     "ExternalSnapshot",
     "ExternalInventoryRecord",
     "AuditLog",
+    "SystemConfig",
 ]
+

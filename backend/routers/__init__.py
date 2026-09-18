@@ -7,6 +7,7 @@ from routers.transfers import router as transfers_router
 from routers.network import router as network_router
 from routers.analytics import router as analytics_router
 from routers.camp import router as camp_router
+from routers.transport import transport_router
 
 __all__ = [
     "auth_router",
@@ -18,4 +19,6 @@ __all__ = [
     "network_router",
     "analytics_router",
     "camp_router",
+    "transport_router",
 ]
+
