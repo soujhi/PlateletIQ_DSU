@@ -3,7 +3,6 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, SectionLabel, Drawer, ProvenanceBadge } from "../shared";
 import { transferApi } from "../api/endpoints";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
-import { ErrorState } from "../components/ErrorState";
 
 const ERAKTKOSH_FACILITIES = [
   { id: "TN-GGH-001", name: "Govt. General Hospital Chennai", role: "Surplus Holding Bank (48 SDP)", sdp: 48, lat: 13.0827, lng: 80.2707 },
@@ -33,15 +32,63 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
   const [reqComponent, setReqComponent] = useState<string>("SDP");
 
   // Operational Transfer State Machine
-  const [transferState, setTransferState] = useState<string>("REQUESTED");
+  const [localState, setLocalState] = useState<string>("REQUESTED");
   const [pickupOtp, setPickupOtp] = useState<string>("849201");
   const [deliveryOtp, setDeliveryOtp] = useState<string>("123456");
 
   const activeFacility = ERAKTKOSH_FACILITIES.find((f) => f.id === activeBankId) || ERAKTKOSH_FACILITIES[0];
 
-  const { data: opps, isLoading, error, refetch } = useQuery({
+  // 1. Fetch Candidate Opportunities
+  const { data: opps, isLoading } = useQuery({
     queryKey: ["transferOpportunities"],
     queryFn: transferApi.getOpportunities,
+  });
+
+  // 2. Poll Central Backend API for Real-Time 2-Laptop Transfer Sync (every 2000ms)
+  const { data: liveTransfers } = useQuery({
+    queryKey: ["liveTransfers"],
+    queryFn: transferApi.listTransfers,
+    refetchInterval: 2000,
+  });
+
+  const activeBackendTransfer = liveTransfers && liveTransfers.length > 0 ? liveTransfers[liveTransfers.length - 1] : null;
+  const transferState = activeBackendTransfer?.status || localState;
+  const activeTransferId = activeBackendTransfer?.id || "TRF-DEMO-001";
+  const displayPickupOtp = activeBackendTransfer?.pickup_otp_code || pickupOtp;
+  const displayDeliveryOtp = activeBackendTransfer?.delivery_otp_code || deliveryOtp;
+
+  // Backend Mutations for Live 2-Laptop Sync
+  const createMutation = useMutation({
+    mutationFn: (payload: any) => transferApi.createTransfer(payload),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
+      setLocalState(data.status || "REQUESTED");
+      if (data.pickup_otp_code) setPickupOtp(data.pickup_otp_code);
+    },
+  });
+
+  const acceptMutation = useMutation({
+    mutationFn: (id: string) => transferApi.acceptTransfer(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
+      setLocalState("UNITS_RESERVED");
+    },
+  });
+
+  const verifyPickupOtpMutation = useMutation({
+    mutationFn: ({ id, otp }: { id: string; otp: string }) => transferApi.verifyPickupOtp(id, otp),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
+      setLocalState("IN_TRANSIT");
+    },
+  });
+
+  const verifyDeliveryOtpMutation = useMutation({
+    mutationFn: ({ id, otp }: { id: string; otp: string }) => transferApi.verifyDeliveryOtp(id, otp),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
+      setLocalState("TRANSFER_COMPLETED");
+    },
   });
 
   const offerMutation = useMutation({
@@ -51,7 +98,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
       queryClient.invalidateQueries({ queryKey: ["transferOpportunities"] });
       setPendingMsg("Transfer Approved! 12 SDP units reserved (AVAILABLE → UNITS_RESERVED). Shiprocket ad-hoc dispatch created.");
       setReviewId(null);
-      setTransferState("UNITS_RESERVED");
+      setLocalState("UNITS_RESERVED");
     },
   });
 
@@ -59,33 +106,54 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
   const handleInitiateShortagePull = (e: React.FormEvent) => {
     e.preventDefault();
     setShortagePullOpen(false);
-    setTransferState("REQUESTED");
-    setPendingMsg(`Shortage Pull Request transmitted to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Awaiting source officer OTP authorization.`);
+    setLocalState("REQUESTED");
+
+    createMutation.mutate({
+      source_blood_bank_id: targetBankId,
+      destination_blood_bank_id: activeBankId,
+      units: reqUnits,
+      component: reqComponent,
+      priority: "high",
+      provider: selectedProvider,
+    });
+
+    setPendingMsg(`Shortage Pull Request transmitted to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Live synced across all network laptops.`);
   };
 
   // Flow B: Initiate Wastage Push (Expiry Prevention)
   const handleInitiateWastagePush = (e: React.FormEvent) => {
     e.preventDefault();
     setWastagePushOpen(false);
-    setTransferState("UNITS_RESERVED");
-    setPendingMsg(`Expiry Prevention Dispatch created! Offered ${reqUnits} ${reqComponent} units expiring <36h to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Courier dispatch initiated.`);
+    setLocalState("UNITS_RESERVED");
+
+    createMutation.mutate({
+      source_blood_bank_id: activeBankId,
+      destination_blood_bank_id: targetBankId,
+      units: reqUnits,
+      component: reqComponent,
+      priority: "urgent",
+      provider: selectedProvider,
+    });
+
+    setPendingMsg(`Expiry Prevention Dispatch created! Offered ${reqUnits} ${reqComponent} units expiring <36h to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Live synced.`);
+  };
+
+  // Authorize Transfer
+  const handleAuthorizeTransfer = () => {
+    acceptMutation.mutate(activeTransferId);
+    setLocalState("UNITS_RESERVED");
+    setPendingMsg("Transfer Authorized! 12 SDP units reserved in inventory. Pickup OTP generated: " + displayPickupOtp);
   };
 
   // OTP Verification Handoff
   const handleVerifyOtp = () => {
     if (otpModalOpen === "pickup") {
-      if (otpInput.trim() !== "" && otpInput !== pickupOtp) {
-        alert("Invalid Pickup OTP! Please enter valid 6-digit cryptographic OTP.");
-        return;
-      }
-      setTransferState("IN_TRANSIT");
+      verifyPickupOtpMutation.mutate({ id: activeTransferId, otp: otpInput || displayPickupOtp });
+      setLocalState("IN_TRANSIT");
       setPendingMsg("Pickup OTP Authorized! Custody transferred to Shiprocket courier driver (Ramesh V.). Shipment IN_TRANSIT.");
     } else if (otpModalOpen === "delivery") {
-      if (otpInput.trim() !== "" && otpInput !== deliveryOtp) {
-        alert("Invalid Delivery OTP! Please enter valid 6-digit receipt OTP.");
-        return;
-      }
-      setTransferState("TRANSFER_COMPLETED");
+      verifyDeliveryOtpMutation.mutate({ id: activeTransferId, otp: otpInput || displayDeliveryOtp });
+      setLocalState("TRANSFER_COMPLETED");
       setPendingMsg("Receipt OTP Authorized! Transfer completed. Inventory settled transactionally (Source -12 SDP, Destination +12 SDP).");
     }
     setOtpModalOpen(null);
@@ -160,7 +228,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               setActiveBankId(e.target.value);
               setPendingMsg(`Switched context to ${ERAKTKOSH_FACILITIES.find(f => f.id === e.target.value)?.name}`);
             }}
-            className="bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[13px] font-medium rounded-full px-3.5 py-1.5 focus:outline-none focus:border-[#0071E3]"
+            className="bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[13px] font-medium rounded-full px-3.5 py-1.5 focus:outline-none focus:border-[#0071E3] cursor-pointer"
           >
             {ERAKTKOSH_FACILITIES.map((f) => (
               <option key={f.id} value={f.id}>
@@ -220,7 +288,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
           </div>
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] border border-[#C8DCF5]">
-              AWB: AWB-SR-998877
+              AWB: {activeBackendTransfer?.awb_code || "AWB-SR-998877"}
             </span>
             <div className="flex items-center gap-1 bg-[#F5F5F7] px-2 py-0.5 rounded-full border border-[#E5E5E7] text-[11px] font-semibold text-[#1D1D1F]">
               <span>PROVIDER:</span>
@@ -240,27 +308,31 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
         {/* Transfer Route & Logistics Summary */}
         <div className="my-3 p-4 bg-white rounded-[12px] border border-[#E5E5E7] shadow-sm">
           <div className="flex items-center justify-between text-[15px] font-semibold text-[#1D1D1F] mb-2">
-            <span>📍 Govt. General Hospital Chennai (Source)</span>
-            <span className="text-[#0071E3]">→ 12 SDP Units →</span>
-            <span>📍 Apollo Hospitals Greams Road (Destination)</span>
+            <span>📍 {activeBackendTransfer?.source_name || "Govt. General Hospital Chennai"}</span>
+            <span className="text-[#0071E3]">→ {activeBackendTransfer?.units || 12} {activeBackendTransfer?.component || "SDP"} Units →</span>
+            <span>📍 {activeBackendTransfer?.destination_name || "Apollo Hospitals Greams Road"}</span>
           </div>
 
           <div className="grid grid-cols-4 gap-3 text-center my-3 py-2.5 bg-[#F5F5F7] rounded-[8px]">
             <div>
               <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Mapbox ETA</p>
-              <p className="text-[15px] font-bold text-[#1D1D1F]">{transferState === "TRANSFER_COMPLETED" ? "Arrived" : "18 mins"}</p>
+              <p className="text-[15px] font-bold text-[#1D1D1F]">
+                {transferState === "TRANSFER_COMPLETED" ? "Arrived" : `${activeBackendTransfer?.eta_minutes || 18} mins`}
+              </p>
             </div>
             <div>
               <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Route Distance</p>
-              <p className="text-[15px] font-bold text-[#1D1D1F]">8.4 km</p>
+              <p className="text-[15px] font-bold text-[#1D1D1F]">{activeBackendTransfer?.distance_km || 8.4} km</p>
             </div>
             <div>
               <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Courier Partner</p>
-              <p className="text-[13px] font-bold text-[#0071E3]">Delhivery Express (Shiprocket)</p>
+              <p className="text-[13px] font-bold text-[#0071E3]">{activeBackendTransfer?.courier_name || "Delhivery Express (Shiprocket)"}</p>
             </div>
             <div>
               <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Rider Details</p>
-              <p className="text-[12px] font-semibold text-[#1D1D1F]">Ramesh V. (TN-01-SR-8888)</p>
+              <p className="text-[12px] font-semibold text-[#1D1D1F]">
+                {activeBackendTransfer?.driver?.name || "Ramesh V."} ({activeBackendTransfer?.driver?.vehicle || "TN-01-SR-8888"})
+              </p>
             </div>
           </div>
 
@@ -277,7 +349,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
             <p className="text-[12px] text-[#6E6E73]">
               {transferState === "REQUESTED"
                 ? "Shortage Pull Request pending: Source giving officer must authorize transfer and issue Pickup OTP"
-                : transferState === "UNITS_RESERVED"
+                : transferState === "UNITS_RESERVED" || transferState === "PICKUP_PENDING"
                 ? "Source Handoff: Verify Pickup OTP with courier rider to dispatch shipment"
                 : transferState === "IN_TRANSIT"
                 ? "Destination Handoff: Verify Receipt OTP upon driver arrival to complete transfer"
@@ -288,22 +360,19 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
           <div className="flex items-center gap-2">
             {transferState === "REQUESTED" && (
               <button
-                onClick={() => {
-                  setTransferState("UNITS_RESERVED");
-                  setPendingMsg("Transfer Authorized! 12 SDP units reserved in inventory. Pickup OTP generated: 849201");
-                }}
+                onClick={handleAuthorizeTransfer}
                 className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
               >
                 Authorize & Accept Transfer →
               </button>
             )}
 
-            {transferState === "UNITS_RESERVED" && (
+            {(transferState === "UNITS_RESERVED" || transferState === "PICKUP_PENDING") && (
               <button
                 onClick={() => setOtpModalOpen("pickup")}
                 className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
               >
-                Verify Pickup OTP ({pickupOtp}) →
+                Verify Pickup OTP ({displayPickupOtp}) →
               </button>
             )}
 
@@ -319,7 +388,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
                   onClick={() => setOtpModalOpen("delivery")}
                   className="px-4 py-2 bg-[#1A8A2C] text-white text-[12px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
                 >
-                  Verify Receipt OTP ({deliveryOtp}) →
+                  Verify Receipt OTP ({displayDeliveryOtp}) →
                 </button>
               </>
             )}
@@ -340,8 +409,8 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
             <span className={transferState !== "REQUESTED" ? "text-[#1A8A2C] font-semibold" : "text-[#0071E3] font-bold animate-pulse"}>
               {transferState !== "REQUESTED" ? "✓ Approved" : "● Awaiting Approval"}
             </span>
-            <span className={["UNITS_RESERVED", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
-              {["UNITS_RESERVED", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "✓ Reserved" : "○ Reserved"}
+            <span className={["UNITS_RESERVED", "PICKUP_PENDING", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
+              {["UNITS_RESERVED", "PICKUP_PENDING", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "✓ Reserved" : "○ Reserved"}
             </span>
             <span className={["IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
               {["IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "✓ Pickup Verified" : "○ Pickup OTP"}
@@ -414,7 +483,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               <select
                 value={targetBankId}
                 onChange={(e) => setTargetBankId(e.target.value)}
-                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
+                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
               >
                 {ERAKTKOSH_FACILITIES.filter(f => f.id !== activeBankId).map((f) => (
                   <option key={f.id} value={f.id}>
@@ -430,7 +499,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
                 <select
                   value={reqComponent}
                   onChange={(e) => setReqComponent(e.target.value)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
+                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
                 >
                   <option value="SDP">SDP (Single Donor Platelet)</option>
                   <option value="RDP">RDP (Random Donor Platelet)</option>
@@ -457,7 +526,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
 
             <button
               type="submit"
-              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
+              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer shadow-sm"
             >
               Submit Shortage Pull Request →
             </button>
@@ -488,7 +557,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               <select
                 value={targetBankId}
                 onChange={(e) => setTargetBankId(e.target.value)}
-                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
+                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
               >
                 {ERAKTKOSH_FACILITIES.filter(f => f.id !== activeBankId).map((f) => (
                   <option key={f.id} value={f.id}>
@@ -504,7 +573,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
                 <select
                   value={reqComponent}
                   onChange={(e) => setReqComponent(e.target.value)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
+                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
                 >
                   <option value="SDP">SDP (Expiring in 28h)</option>
                   <option value="RDP">RDP (Expiring in 34h)</option>
@@ -531,7 +600,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
 
             <button
               type="submit"
-              className="w-full py-3 bg-[#BA7517] text-white text-[14px] font-semibold rounded-full hover:bg-[#9A5F10] transition-colors cursor-pointer"
+              className="w-full py-3 bg-[#BA7517] text-white text-[14px] font-semibold rounded-full hover:bg-[#9A5F10] transition-colors cursor-pointer shadow-sm"
             >
               Dispatch Expiry Transfer & Reserve Units →
             </button>
@@ -553,8 +622,8 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               </p>
               <p className="text-[12px] text-[#1D1D1F] leading-relaxed">
                 {otpModalOpen === "pickup"
-                  ? `Verify 6-digit OTP provided by courier rider (Ramesh V. - Shiprocket/Delhivery) before transferring custody from AVAILABLE to UNITS_RESERVED → IN_TRANSIT. Active Pickup OTP: ${pickupOtp}`
-                  : `Verify 6-digit OTP upon arrival before confirming unit receipt and reallocating inventory in eRaktKosh ledger. Active Delivery OTP: ${deliveryOtp}`}
+                  ? `Verify 6-digit OTP provided by courier rider (Ramesh V. - Shiprocket/Delhivery) before transferring custody from AVAILABLE to UNITS_RESERVED → IN_TRANSIT. Active Pickup OTP: ${displayPickupOtp}`
+                  : `Verify 6-digit OTP upon arrival before confirming unit receipt and reallocating inventory in eRaktKosh ledger. Active Delivery OTP: ${displayDeliveryOtp}`}
               </p>
             </div>
 
@@ -563,16 +632,16 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
               <input
                 type="text"
                 maxLength={6}
-                placeholder={otpModalOpen === "pickup" ? pickupOtp : deliveryOtp}
+                placeholder={otpModalOpen === "pickup" ? displayPickupOtp : displayDeliveryOtp}
                 value={otpInput}
                 onChange={(e) => setOtpInput(e.target.value)}
-                className="w-full border border-[#E5E5E7] rounded-[8px] p-3 text-[20px] font-mono tracking-widest text-center"
+                className="w-full border border-[#E5E5E7] rounded-[8px] p-3 text-[20px] font-mono tracking-widest text-center font-bold text-[#0071E3]"
               />
             </div>
 
             <button
               onClick={handleVerifyOtp}
-              className="w-full py-3 bg-[#1A8A2C] text-white text-[14px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
+              className="w-full py-3 bg-[#1A8A2C] text-white text-[14px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer shadow-sm"
             >
               Authorize OTP & Update Custody State
             </button>
@@ -596,7 +665,7 @@ export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (
             </div>
             <button
               onClick={() => offerMutation.mutate({ oppId: selectedOpp.id, quantity: selectedOpp.units })}
-              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
+              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer shadow-sm"
             >
               Accept Transfer & Reserve Units
             </button>
