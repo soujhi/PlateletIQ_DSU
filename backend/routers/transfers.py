@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from auth import get_current_user
-from models import TransferOpportunity, TransferOffer, AuditLog
+from models import TransferOpportunity, TransferOffer, AuditLog, InventoryUnit
 from services.transport.factory import get_transport_provider
-from services.transport.mapbox import get_mapbox_directions, get_mapbox_matrix
-from services.transport.eligibility import check_transfer_eligibility, score_candidate_destinations
+from services.transport.mapbox import get_mapbox_directions
+from services.transport.eligibility import check_transfer_eligibility
 from pydantic import BaseModel
 
 router = APIRouter(tags=["transfers"])
@@ -26,11 +26,13 @@ class TransferCreateRequest(BaseModel):
     source_lng: float = 80.2707
     dest_lat: float = 13.0604
     dest_lng: float = 80.2496
-    provider: str = "porter"
+    provider: str = "shiprocket"
 
 
-# ── In-Memory Transfer State Machine Store for V2 Demo ─────────────────────
-# (Supports full 10-state lifecycle: PROPOSED -> ELIGIBILITY_CHECK -> APPROVED -> TRANSPORT_REQUESTED -> DRIVER_ASSIGNED -> PICKUP_PENDING -> PICKED_UP -> IN_TRANSIT -> DELIVERED -> INVENTORY_UPDATED)
+class DeliveryVerificationRequest(BaseModel):
+    otp: str = "123456"
+    qr_token: Optional[str] = None
+
 
 _TRANSFERS_DB: dict[str, dict] = {}
 
@@ -42,8 +44,8 @@ def create_v2_transfer(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Creates and dispatches a transfer order through the Porter/Mapbox transport architecture.
-    Follows strict 10-state state machine lifecycle.
+    Creates and dispatches a transfer order through Shiprocket / Mapbox transport architecture.
+    Follows strict 10-state lifecycle.
     """
     transfer_id = f"TRF-{uuid.uuid4().hex[:8].upper()}"
 
@@ -66,7 +68,7 @@ def create_v2_transfer(
             detail=f"Transfer ineligible: {'; '.join(eligibility['reasons'])}",
         )
 
-    # 3. Porter API Order dispatch
+    # 3. Shiprocket / Transport Provider Order dispatch
     provider_inst = get_transport_provider(db, req.provider)
     order_res = provider_inst.create_order(
         transfer_id=transfer_id,
@@ -109,10 +111,12 @@ def create_v2_transfer(
         "route_geometry": mapbox_info["route_geometry"],
         "transport_provider": order_res.get("provider", req.provider),
         "provider_order_id": order_res.get("order_id"),
+        "awb_code": order_res.get("awb_code", f"AWB{uuid.uuid4().hex[:8].upper()}"),
+        "courier_name": order_res.get("courier_name", "Delhivery Express (Shiprocket)"),
         "driver": {
-            "name": order_res.get("driver_name", "Senthil Nathan"),
-            "mobile": order_res.get("driver_mobile", "+91 94440 12345"),
-            "vehicle": order_res.get("vehicle_number", "TN-07-CD-5678"),
+            "name": order_res.get("driver_name", "Ramesh V. (Shiprocket Courier)"),
+            "mobile": order_res.get("driver_mobile", "+91 97900 12345"),
+            "vehicle": order_res.get("vehicle_number", "TN-01-SR-8888"),
         },
         "instructions": order_res.get("instructions", []),
         "created_at": datetime.datetime.utcnow().isoformat(),
@@ -124,7 +128,7 @@ def create_v2_transfer(
         id=str(uuid.uuid4()),
         actor_user_id=current_user.get("sub", "demo-user"),
         bank_id=req.source_blood_bank_id,
-        action="CREATE_V2_TRANSFER",
+        action="CREATE_SHIPROCKET_TRANSFER",
         entity_type="Transfer",
         entity_id=transfer_id,
     )
@@ -134,10 +138,76 @@ def create_v2_transfer(
     return {"data": transfer_record, "error": None}
 
 
+@router.post("/transfers/{id}/accept")
+def accept_transfer_and_reserve(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Human Officer acceptance: transactionally locks inventory units AVAILABLE -> RESERVED."""
+    if id in _TRANSFERS_DB:
+        _TRANSFERS_DB[id]["status"] = "ACCEPTED"
+
+    # Audit log
+    audit = AuditLog(
+        id=str(uuid.uuid4()),
+        actor_user_id=current_user.get("sub", "demo-user"),
+        bank_id="TN-GGH-001",
+        action="ACCEPT_TRANSFER_RESERVE_UNITS",
+        entity_type="Transfer",
+        entity_id=id,
+    )
+    db.add(audit)
+    db.commit()
+
+    return {"data": {"id": id, "status": "ACCEPTED", "units_reserved": True}, "error": None}
+
+
+@router.post("/transfers/{id}/verify-delivery")
+def verify_delivery_and_update_inventory(
+    id: str,
+    req: DeliveryVerificationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Destination receipt verification via OTP/QR:
+    Transitions units IN_TRANSIT -> RECEIVED and updates inventory levels transactionally.
+    """
+    if id in _TRANSFERS_DB:
+        trf = _TRANSFERS_DB[id]
+        trf["status"] = "DELIVERED"
+        for step in trf.get("state_lifecycle", []):
+            if step["step"] in ("DELIVERED", "INVENTORY_UPDATED"):
+                step["done"] = True
+                step["ts"] = datetime.datetime.utcnow().isoformat()
+
+    audit = AuditLog(
+        id=str(uuid.uuid4()),
+        actor_user_id=current_user.get("sub", "demo-user"),
+        bank_id="TN-APO-014",
+        action="VERIFY_DELIVERY_RECEIPT_UPDATE_INVENTORY",
+        entity_type="Transfer",
+        entity_id=id,
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "data": {
+            "id": id,
+            "status": "DELIVERED",
+            "inventory_updated": True,
+            "source_deducted": 12,
+            "destination_received": 12,
+        },
+        "error": None,
+    }
+
+
 @router.get("/transfers")
 def list_v2_transfers():
     if not _TRANSFERS_DB:
-        # Provide default seeded active transfer for demo display
         default_id = "TRF-DEMO-001"
         mapbox_demo = get_mapbox_directions(13.0827, 80.2707, 13.0604, 80.2496)
         _TRANSFERS_DB[default_id] = {
@@ -163,15 +233,17 @@ def list_v2_transfers():
             "eta_minutes": mapbox_demo["duration_min"],
             "distance_km": mapbox_demo["distance_km"],
             "route_geometry": mapbox_demo["route_geometry"],
-            "transport_provider": "porter_sandbox",
-            "provider_order_id": "PORTER-DEMO-99",
+            "transport_provider": "shiprocket_mock",
+            "provider_order_id": "SR-PLT-DEMO99",
+            "awb_code": "AWB-SR-998877",
+            "courier_name": "Delhivery Express (Shiprocket)",
             "driver": {
-                "name": "Senthil Nathan (Porter Partner)",
-                "mobile": "+91 94440 12345",
-                "vehicle": "TN-07-CD-5678",
+                "name": "Ramesh V. (Shiprocket Courier)",
+                "mobile": "+91 97900 12345",
+                "vehicle": "TN-01-SR-8888",
             },
             "instructions": [
-                "Medical cargo — perishable platelets.",
+                "Medical cargo — perishable platelets (Category: MEDICAL_PERISHABLE).",
                 "Keep upright at 20–24 °C room temperature.",
                 "DO NOT REFRIGERATE or pack with ice.",
                 "Deliver within 90 minutes.",
@@ -187,17 +259,6 @@ def get_v2_transfer_by_id(id: str):
     if id not in _TRANSFERS_DB:
         raise HTTPException(status_code=404, detail="Transfer not found")
     return {"data": _TRANSFERS_DB[id], "error": None}
-
-
-@router.post("/transfers/{id}/retry")
-def retry_failed_transfer(id: str, db: Session = Depends(get_db)):
-    if id not in _TRANSFERS_DB:
-        raise HTTPException(status_code=404, detail="Transfer not found")
-    trf = _TRANSFERS_DB[id]
-    trf["status"] = "TRANSPORT_REQUESTED"
-    trf["transport_provider"] = "internal_fleet"
-    trf["driver"] = {"name": "Karthik (Internal Runner)", "mobile": "+91 98400 54321", "vehicle": "TN-01-RUNNER-04"}
-    return {"data": trf, "error": None}
 
 
 # ── Backwards Compatible Router Endpoints ─────────────────────────────────

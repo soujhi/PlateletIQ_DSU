@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from services.transport.factory import get_transport_provider
+from services.transport.shiprocket import ShiprocketTransportProvider
 from services.transport.mapbox import get_mapbox_directions, get_mapbox_matrix
 from services.config_service import get_config, SystemConfig
 from pydantic import BaseModel
+from typing import Optional
 
 transport_router = APIRouter(tags=["Transport"])
 
@@ -14,7 +16,13 @@ class QuoteRequest(BaseModel):
     origin_lng: float
     destination_lat: float
     destination_lng: float
-    provider: str = "porter"
+    provider: str = "shiprocket"
+
+
+class ServiceabilityRequest(BaseModel):
+    pickup_pincode: str = "600003"
+    delivery_pincode: str = "600006"
+    weight_kg: float = 0.5
 
 
 class ProviderSetRequest(BaseModel):
@@ -25,8 +33,14 @@ class ProviderSetRequest(BaseModel):
 def list_transport_providers(db: Session = Depends(get_db)):
     current_provider = get_config(db, "TRANSPORT_PROVIDER")
     return {
-        "active_provider": current_provider,
+        "active_provider": current_provider or "shiprocket",
         "available_providers": [
+            {
+                "id": "shiprocket",
+                "name": "Shiprocket Logistics API",
+                "description": "Multi-courier express dispatch (Delhivery / Bluedart) with 20–24 °C instructions",
+                "status": "active" if current_provider in ("shiprocket", "") else "available",
+            },
             {
                 "id": "porter",
                 "name": "Porter Logistics API",
@@ -51,8 +65,8 @@ def list_transport_providers(db: Session = Depends(get_db)):
 
 @transport_router.post("/transport/set-provider")
 def set_active_transport_provider(req: ProviderSetRequest, db: Session = Depends(get_db)):
-    if req.provider not in ("porter", "internal", "beckn"):
-        raise HTTPException(status_code=400, detail="Invalid provider. Must be one of: porter, internal, beckn")
+    if req.provider not in ("shiprocket", "porter", "internal", "beckn"):
+        raise HTTPException(status_code=400, detail="Invalid provider. Must be one of: shiprocket, porter, internal, beckn")
 
     cfg = db.query(SystemConfig).filter(SystemConfig.key == "TRANSPORT_PROVIDER").first()
     if not cfg:
@@ -63,6 +77,16 @@ def set_active_transport_provider(req: ProviderSetRequest, db: Session = Depends
     db.commit()
 
     return {"status": "ok", "active_provider": req.provider}
+
+
+@transport_router.post("/transport/serviceability")
+def check_shiprocket_serviceability(req: ServiceabilityRequest):
+    sr = ShiprocketTransportProvider()
+    return sr.get_serviceability(
+        pickup_pincode=req.pickup_pincode,
+        delivery_pincode=req.delivery_pincode,
+        weight=req.weight_kg,
+    )
 
 
 @transport_router.post("/transport/quote")

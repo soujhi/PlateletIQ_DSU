@@ -3,6 +3,7 @@ from services.transport.base import TransportProvider
 from services.transport.internal import InternalFleetProvider
 from services.transport.porter import PorterProvider
 from services.transport.beckn import BecknLogisticsProvider
+from services.transport.shiprocket import ShiprocketTransportProvider
 from services.config_service import get_config
 
 
@@ -11,18 +12,20 @@ def get_transport_provider(db_session: Any = None, provider_name: str = "") -> T
     Factory function resolving the active TransportProvider based on:
     1. Explicit provider_name parameter
     2. Database config key 'TRANSPORT_PROVIDER'
-    3. Default fallback to 'porter'
+    3. Default fallback to 'shiprocket'
     """
     name = provider_name
     if not name and db_session:
         name = get_config(db_session, "TRANSPORT_PROVIDER")
     if not name:
-        name = "porter"
+        name = "shiprocket"
 
     name = name.lower()
-    if name == "internal":
+    if name == "shiprocket":
+        return ShiprocketTransportProvider()
+    elif name == "internal":
         return InternalFleetProvider()
     elif name == "beckn":
         return BecknLogisticsProvider()
-    else: # default porter
+    else:  # default porter
         return PorterProvider()
