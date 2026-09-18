@@ -9,7 +9,7 @@ export default function TransfersScreen() {
   const queryClient = useQueryClient();
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [pendingMsg, setPendingMsg] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<string>("porter");
+  const [selectedProvider, setSelectedProvider] = useState<string>("shiprocket");
 
   const { data: opps, isLoading, error, refetch } = useQuery({
     queryKey: ["transferOpportunities"],
@@ -21,7 +21,7 @@ export default function TransfersScreen() {
       transferApi.makeOffer(oppId, { quantity }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["transferOpportunities"] });
-      setPendingMsg("Porter Delivery Created! Transport requested with cold-chain 20–24 °C instructions.");
+      setPendingMsg("Shiprocket Transfer Accepted! Units reserved & adhoc delivery dispatched with 20–24 °C instructions.");
       setReviewId(null);
     },
   });
@@ -54,11 +54,11 @@ export default function TransfersScreen() {
             Transfers & Transport Dispatch
           </h1>
           <p className="text-[14px] text-[#6E6E73] mt-1">
-            Porter + Mapbox logistics execution network · 20–24 °C Cold-Chain Tracking
+            Shiprocket + Mapbox Logistics Integration · Cold-Chain 20–24 °C Tracking
           </p>
         </div>
         <div className="flex items-center gap-2 bg-[#F5F5F7] p-1 rounded-full border border-[#E5E5E7]">
-          {["porter", "internal", "beckn"].map((p) => (
+          {["shiprocket", "porter", "internal", "beckn"].map((p) => (
             <button
               key={p}
               onClick={() => setSelectedProvider(p)}
@@ -68,7 +68,7 @@ export default function TransfersScreen() {
                   : "text-[#6E6E73] hover:text-[#1D1D1F]"
               }`}
             >
-              {p === "porter" ? "Porter API" : p === "internal" ? "Internal Fleet" : "ONDC Beckn BAP"}
+              {p === "shiprocket" ? "Shiprocket API" : p === "porter" ? "Porter API" : p === "internal" ? "Internal Fleet" : "ONDC Beckn"}
             </button>
           ))}
         </div>
@@ -81,16 +81,21 @@ export default function TransfersScreen() {
         </div>
       )}
 
-      {/* Active Transfer Card with Mapbox & Porter Info */}
+      {/* Active Transfer Card with Mapbox & Shiprocket Info */}
       <Card className="p-6 mb-6 border-l-4 border-l-[#0071E3] bg-gradient-to-br from-white to-[#F9FAFB]">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#1A8A2C] animate-pulse" />
             <SectionLabel>Active Platelet Transfer · In Transit</SectionLabel>
           </div>
-          <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] border border-[#C8DCF5]">
-            Provider: {selectedProvider.toUpperCase()}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] border border-[#C8DCF5]">
+              AWB: AWB-SR-998877
+            </span>
+            <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-[#F5F5F7] text-[#1D1D1F] border border-[#E5E5E7]">
+              {selectedProvider.toUpperCase()}
+            </span>
+          </div>
         </div>
 
         <div className="my-3 p-4 bg-white rounded-[12px] border border-[#E5E5E7] shadow-sm">
@@ -110,13 +115,13 @@ export default function TransfersScreen() {
               <p className="text-[16px] font-bold text-[#1D1D1F]">8.4 km</p>
             </div>
             <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Driver / Partner</p>
-              <p className="text-[13px] font-bold text-[#0071E3]">Senthil Nathan</p>
+              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Courier Partner</p>
+              <p className="text-[13px] font-bold text-[#0071E3]">Delhivery Express (Shiprocket)</p>
             </div>
           </div>
 
           <div className="p-2.5 bg-[#FFF8E1] border border-[#FFE082] rounded-[8px] text-[11px] text-[#B25000]">
-            <span className="font-bold">🧊 Cold-Chain Instruction:</span> Medical cargo — keep upright at 20–24 °C. Do NOT refrigerate.
+            <span className="font-bold">🧊 Cold-Chain Instruction:</span> Medical cargo (Category: MEDICAL_PERISHABLE) — keep upright at 20–24 °C. Do NOT refrigerate.
           </div>
         </div>
 
@@ -126,22 +131,22 @@ export default function TransfersScreen() {
           <div className="flex items-center justify-between text-[10px] font-medium text-[#6E6E73]">
             <span className="text-[#1A8A2C] font-semibold">✓ Proposed</span>
             <span className="text-[#1A8A2C] font-semibold">✓ Eligibility Check</span>
-            <span className="text-[#1A8A2C] font-semibold">✓ Approved</span>
-            <span className="text-[#1A8A2C] font-semibold">✓ Driver Assigned</span>
+            <span className="text-[#1A8A2C] font-semibold">✓ Accepted (Reserved)</span>
+            <span className="text-[#1A8A2C] font-semibold">✓ Shiprocket Order</span>
             <span className="text-[#0071E3] font-bold animate-pulse">● In Transit</span>
-            <span className="text-[#AEAEB2]">○ Delivered</span>
+            <span className="text-[#AEAEB2]">○ Received</span>
           </div>
         </div>
       </Card>
 
-      {/* Cross-bank transfer opportunities */}
+      {/* Eligible Candidate Transfers */}
       <Card className="p-6 mb-6">
         <div className="flex items-center justify-between mb-4">
-          <SectionLabel>Eligible Candidate Transfers</SectionLabel>
+          <SectionLabel>Eligible Candidate Network Transfers</SectionLabel>
           <ProvenanceBadge type="external" />
         </div>
         <p className="text-[12px] text-[#6E6E73] mb-4">
-          Filtered using Mapbox Matrix travel times and shelf-life residual criteria.
+          Evaluated via Mapbox Matrix travel times, shelf-life residual, and source transferable surplus.
         </p>
 
         <div className="space-y-3">
@@ -161,7 +166,7 @@ export default function TransfersScreen() {
                   onClick={() => setReviewId(t.id)}
                   className="text-[13px] font-medium text-[#0071E3] bg-[#E8F1FC] px-3 py-1.5 rounded-full hover:bg-[#D0E4F8] transition-colors flex-shrink-0"
                 >
-                  Create Porter Order →
+                  Review Transfer →
                 </button>
               </div>
             </div>
@@ -172,22 +177,22 @@ export default function TransfersScreen() {
       {/* Transfer review drawer */}
       {selectedOpp && (
         <Drawer
-          title="Dispatch Transfer Order"
+          title="Review & Dispatch Transfer Order"
           subtitle={`${selectedOpp.from} → ${selectedOpp.to}`}
           onClose={() => setReviewId(null)}
         >
           <div className="space-y-5">
             <div>
-              <SectionLabel>Mapbox Routing & Porter Dispatch</SectionLabel>
+              <SectionLabel>Mapbox Routing & Shiprocket Dispatch</SectionLabel>
               <p className="text-[14px] text-[#1D1D1F] mb-2">{selectedOpp.reason}</p>
               <p className="text-[13px] text-[#6E6E73]">Available Surplus: {selectedOpp.units} units</p>
-              <p className="text-[13px] text-[#6E6E73]">Active Transport Provider: <strong className="text-[#0071E3]">{selectedProvider.toUpperCase()}</strong></p>
+              <p className="text-[13px] text-[#6E6E73]">Active Provider: <strong className="text-[#0071E3]">{selectedProvider.toUpperCase()}</strong></p>
             </div>
             <button
               onClick={() => offerMutation.mutate({ oppId: selectedOpp.id, quantity: selectedOpp.units })}
               className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors"
             >
-              Confirm & Dispatch Delivery
+              Accept Transfer & Reserve Units
             </button>
           </div>
         </Drawer>
