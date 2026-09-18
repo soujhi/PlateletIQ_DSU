@@ -4,7 +4,6 @@ import { Card, SectionLabel, Drawer, ProvenanceBadge } from "../shared";
 import { transferApi } from "../api/endpoints";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 import { ErrorState } from "../components/ErrorState";
-import { useNavigate } from "react-router-dom";
 
 const ERAKTKOSH_FACILITIES = [
   { id: "TN-GGH-001", name: "Govt. General Hospital Chennai", role: "Surplus Holding Bank (48 SDP)", sdp: 48, lat: 13.0827, lng: 80.2707 },
@@ -14,9 +13,8 @@ const ERAKTKOSH_FACILITIES = [
   { id: "TN-MGM-005", name: "MGM Healthcare Adyar", role: "Surplus Reserve (22 SDP)", sdp: 22, lat: 13.0084, lng: 80.2571 },
 ];
 
-export default function TransfersScreen() {
+export default function TransfersScreen({ onViewTracking }: { onViewTracking?: () => void }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
 
   const [activeBankId, setActiveBankId] = useState<string>("TN-GGH-001");
   const [selectedProvider, setSelectedProvider] = useState<string>("shiprocket");

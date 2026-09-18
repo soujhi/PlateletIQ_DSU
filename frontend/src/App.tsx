@@ -87,7 +87,7 @@ function MainApp() {
       case "inventory": return <InventoryScreen />;
       case "actions":   return <ActionsScreen />;
       case "analytics": return <AnalyticsScreen />;
-      case "transfers": return <TransfersScreen />;
+      case "transfers": return <TransfersScreen onViewTracking={() => setScreen("tracking")} />;
       case "tracking":  return <TransferTrackingScreen />;
       case "network":   return <NetworkScreen />;
       case "waste":     return <WasteRecoveryScreen />;
