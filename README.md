@@ -40,6 +40,30 @@ PlateletIQ operates on a **Decoupled Two-Track Data Architecture**:
 
 ## 🚀 Quick Start
 
+### One command
+
+**Windows** — double-click `start.bat`, or from a Command Prompt:
+
+```cmd
+start.bat
+```
+
+**macOS / Linux**:
+
+```bash
+./start.sh
+```
+
+It creates the virtual environment, installs both sets of dependencies,
+generates `backend/.env` with fresh secrets, starts the backend, **waits until
+the API actually answers**, then starts the frontend and opens the browser.
+Re-running it skips whatever is already in place.
+
+Order matters: the UI reads the API's configuration when it loads, so the
+backend has to be answering first.
+
+### Or by hand
+
 ### 1. Backend
 
 ```bash
@@ -47,19 +71,13 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate          # .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-
-cp .env.example .env
-# Fill in JWT_SECRET and OTP_SECRET — generate each with:
-#   python3 -c "import secrets; print(secrets.token_hex(32))"
-# To sign in without Google credentials, also set ALLOW_DEV_SIGNIN=1
-
+python ../scripts/bootstrap_env.py  # writes .env with generated secrets
 python -m uvicorn main:app --port 8000
 ```
 
 The facility registry and each facility's opening stock are seeded
-automatically on first start. Check `http://127.0.0.1:8000/api/v1/health` — it
-reports which integrations are actually configured. Interactive API docs are at
-`http://127.0.0.1:8000/docs`.
+automatically on first start. `http://127.0.0.1:8000/api/v1/health` reports
+which integrations are actually configured. API docs are at `/docs`.
 
 ### 2. Frontend
 
