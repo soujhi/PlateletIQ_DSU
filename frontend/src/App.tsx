@@ -200,6 +200,10 @@ function MainApp() {
           <span className="text-[13px] font-medium text-[#1D1D1F]">Chennai, Tamil Nadu</span>
           <span className="text-[#E5E5E7] font-light">·</span>
           <span className="text-[13px] text-[#6E6E73]">{today}</span>
+          <span className="text-[#E5E5E7] font-light">·</span>
+          {/* Build marker: if this is missing, an older copy of the UI is
+              being served on this port. */}
+          <span className="text-[12px] text-[#AEAEB2]">Transfer pipeline v3</span>
         </div>
 
         <div className="flex-1 overflow-y-auto">{renderScreen()}</div>
