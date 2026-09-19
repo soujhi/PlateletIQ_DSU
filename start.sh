@@ -12,7 +12,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-API_URL="http://127.0.0.1:8000/api/v1/health"
+# /auth/config, not /health: an older backend also answers /health, so
+# gating on it would accept a stale server squatting on the port.
+API_URL="http://127.0.0.1:8000/api/v1/auth/config"
 UI_URL="http://127.0.0.1:5173/"
 
 say()  { printf '  %s\n' "$*"; }

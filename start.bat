@@ -66,7 +66,7 @@ echo       Waiting for the API to come up...
 set /a attempts=0
 :wait_api
 set /a attempts+=1
-curl -s -o nul http://127.0.0.1:8000/api/v1/health && goto api_ready
+curl -s -o nul http://127.0.0.1:8000/api/v1/auth/config && goto api_ready
 if %attempts% GEQ 90 goto api_timeout
 timeout /t 1 /nobreak >nul
 goto wait_api
@@ -133,8 +133,12 @@ echo ERROR: npm install failed. Scroll up for the reason.
 goto fail
 
 :api_timeout
-echo ERROR: The backend did not answer within 90 seconds.
-echo Look at the "PlateletIQ backend" window for the error.
+echo ERROR: This build's API did not answer within 90 seconds.
+echo.
+echo If the "PlateletIQ backend" window says the port is already in use, an
+echo older server is still holding port 8000. Close it, or run:
+echo     taskkill /F /IM python.exe
+echo and start this again.
 goto fail
 
 :ui_timeout
