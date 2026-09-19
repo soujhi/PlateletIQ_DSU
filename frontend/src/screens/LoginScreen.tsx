@@ -11,6 +11,7 @@ import { API_BASE_URL } from "../api/client";
 export default function LoginScreen() {
   const {
     authConfig,
+    configError,
     authError,
     signInWithGoogleCredential,
     signInWithGoogleRedirect,
@@ -169,8 +170,15 @@ export default function LoginScreen() {
           {serverUnreachable && (
             <div className="mb-5 rounded-[10px] px-4 py-3" style={{ background: "#FFF8E6", border: "1px solid #F0DCA8" }}>
               <p className="text-[13px] text-[#8A6100] leading-relaxed">
-                Cannot reach the API at <code className="font-mono text-[12px]">{API_BASE_URL}</code>.
-                Start the backend, then reload.
+                Waiting for the API at <code className="font-mono text-[12px]">{API_BASE_URL}</code>…
+              </p>
+              {configError && (
+                <p className="text-[12px] text-[#8A6100] mt-1.5 leading-relaxed opacity-80">{configError}</p>
+              )}
+              <p className="text-[12px] text-[#8A6100] mt-2 leading-relaxed opacity-80">
+                Start the backend and this page will connect on its own — no reload needed. If the
+                address above is wrong, set <code className="font-mono text-[11px]">VITE_API_BASE_URL</code>{" "}
+                in <code className="font-mono text-[11px]">frontend/.env.local</code>.
               </p>
             </div>
           )}

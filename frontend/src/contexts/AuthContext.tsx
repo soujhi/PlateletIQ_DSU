@@ -23,6 +23,8 @@ interface AuthContextValue {
   stage: SessionStage;
   isLoading: boolean;
   authConfig: AuthConfig | null;
+  /** Why the last attempt to reach the API failed, if it did. */
+  configError: string | null;
   authError: string | null;
   signInWithGoogleCredential: (credential: string) => Promise<void>;
   signInWithGoogleRedirect: () => Promise<void>;
@@ -39,6 +41,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [facility, setFacility] = useState<Facility | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const applySession = useCallback((token: string, sessionUser: SessionUser) => {
@@ -87,9 +90,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       try {
         const config = await authApi.getConfig();
-        if (!cancelled) setAuthConfig(config);
-      } catch {
-        // The sign-in screen renders its own "cannot reach the API" state.
+        if (!cancelled) {
+          setAuthConfig(config);
+          setConfigError(null);
+        }
+      } catch (err) {
+        // Keep the reason — the sign-in screen shows it, and the retry below
+        // clears it the moment the API answers.
+        if (!cancelled) {
+          setConfigError(err instanceof Error ? err.message : "Could not reach the API.");
+        }
       }
 
       if (getStoredToken()) {
@@ -116,6 +126,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       cancelled = true;
     };
   }, []);
+
+  /**
+   * Keep trying to reach the API until it answers.
+   *
+   * Starting the frontend before the backend is the normal order of events
+   * during setup, and that first request fails. Without this the sign-in
+   * screen would sit on "cannot reach the API" until someone reloaded by
+   * hand, even once the backend was up. Polling stops as soon as it connects.
+   */
+  useEffect(() => {
+    if (authConfig || isLoading) return;
+
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const config = await authApi.getConfig();
+        if (!cancelled) {
+          setAuthConfig(config);
+          setConfigError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setConfigError(err instanceof Error ? err.message : "Could not reach the API.");
+        }
+      }
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authConfig, isLoading]);
 
   const signInWithGoogleCredential = useCallback(
     async (credential: string) => {
@@ -167,6 +209,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       stage,
       isLoading,
       authConfig,
+      configError,
       authError,
       signInWithGoogleCredential,
       signInWithGoogleRedirect,
@@ -176,7 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       signOut,
     }),
     [
-      user, facility, stage, isLoading, authConfig, authError,
+      user, facility, stage, isLoading, authConfig, configError, authError,
       signInWithGoogleCredential, signInWithGoogleRedirect, signInForDevelopment,
       selectFacility, changeFacility, signOut,
     ],
