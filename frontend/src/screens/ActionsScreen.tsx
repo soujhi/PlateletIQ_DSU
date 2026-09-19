@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, SectionLabel, StatusBadge, ProvenanceBadge, DemoModeBanner, Drawer } from "../shared";
-import { recommendationApi, transferApi, requisitionApi } from "../api/endpoints";
+import { facilityApi, recommendationApi, transferApi, requisitionApi } from "../api/endpoints";
+import type { Counterparty } from "../api/types";
+import { useAuth } from "../contexts/AuthContext";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 import { ErrorState } from "../components/ErrorState";
 
 export default function ActionsScreen() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [reqOpen, setReqOpen] = useState(false);
@@ -30,9 +33,13 @@ export default function ActionsScreen() {
     queryFn: recommendationApi.getCurrent,
   });
 
-  const { data: oppsData } = useQuery({
-    queryKey: ["transferOpportunities"],
-    queryFn: transferApi.getOpportunities,
+  // Real transfer candidates: facilities that currently hold usable SDP stock,
+  // ranked by how much they hold. Nothing here is suggested unless the other
+  // facility actually has the units on its ledger right now.
+  const { data: candidates } = useQuery({
+    queryKey: ["counterparties", "SDP", user?.bank_id],
+    queryFn: () => facilityApi.counterparties("SDP"),
+    enabled: Boolean(user?.bank_id),
   });
 
   const confirmMutation = useMutation({
@@ -59,16 +66,26 @@ export default function ActionsScreen() {
     },
   });
 
-  const offerMutation = useMutation({
-    mutationFn: ({ oppId, quantity }: { oppId: string; quantity: number }) =>
-      transferApi.makeOffer(oppId, { quantity }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["transferOpportunities"] });
-      setTransferMsg("Transfer request submitted successfully! Awaiting regional hub response.");
+  const requestUnitsMutation = useMutation({
+    mutationFn: ({ facilityId, units }: { facilityId: string; units: number }) =>
+      transferApi.create({
+        counterparty_bank_id: facilityId,
+        direction: "SHORTAGE_PULL",
+        units,
+        component_type: "SDP",
+        priority: "URGENT",
+        reason: "Raised from the decision engine against a projected SDP shortfall.",
+      }),
+    onSuccess: (transfer) => {
+      queryClient.invalidateQueries({ queryKey: ["transfers"] });
+      setTransferMsg(
+        `Request ${transfer.id} sent to ${transfer.source.short_name}. They decide whether to release the units — watch Transfers for their response.`,
+      );
       setTransferReviewId(null);
     },
     onError: (err: any) => {
-      alert(err.response?.data?.detail || "Failed to submit transfer request");
+      setTransferMsg(null);
+      alert(err?.message || "Could not open the transfer.");
     },
   });
 
@@ -102,8 +119,12 @@ export default function ActionsScreen() {
   }
 
   const rec = recData;
-  const opportunities = oppsData || [];
-  const selectedTransferOpp = opportunities.find((o: any) => o.id === transferReviewId || o.from === transferReviewId);
+  // Somebody worth asking: the nearest facility that can actually cover a
+  // typical 12-unit pull.
+  const opportunities: Counterparty[] = (candidates ?? [])
+    .filter((candidate) => candidate.available_units >= 12)
+    .sort((a, b) => (a.straight_line_km ?? Infinity) - (b.straight_line_km ?? Infinity));
+  const selectedTransferOpp = opportunities.find((candidate) => candidate.id === transferReviewId) ?? null;
 
   const isConfirmed = rec.status === "CONFIRMED";
   const isAdjusted = rec.status === "ADJUSTED";
@@ -148,32 +169,34 @@ export default function ActionsScreen() {
           </div>
         )}
 
-        {/* Transfer opportunity — shown first */}
-        {opportunities.slice(0, 1).map((t: any) => (
+        {/* Nearest facility that could cover a shortfall */}
+        {opportunities.slice(0, 1).map((candidate) => (
           <div
-            key={t.id || t.from}
+            key={candidate.id}
             className="mb-5 rounded-[14px] border border-[#E5E5E7] bg-white p-6"
             style={{ borderLeft: "4px solid #0071E3" }}
           >
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
                 <p className="text-[10px] font-semibold text-[#AEAEB2] uppercase tracking-widest mb-2">
-                  PlateletIQ found — potential transfer
+                  Closest facility holding usable SDP
                 </p>
                 <p className="text-[17px] font-semibold text-[#1D1D1F] mb-1">
-                  {t.from} → {t.to || "Govt. General Hospital Chennai"} · {t.units || t.potential_quantity || 60} units
+                  {candidate.short_name} · {candidate.available_units} usable SDP units
                 </p>
-                <p className="text-[12px] text-[#6E6E73]">{t.reason || t.reason_summary}</p>
-                <div className="flex items-center gap-2 mt-2">
-                  <span className="text-[12px] text-[#6E6E73]">Source freshness</span>
-                  <span className="text-[11px] font-medium text-[#1A8A2C] bg-[#E8F4EB] px-2 py-0.5 rounded-full">● CURRENT</span>
-                </div>
+                <p className="text-[12px] text-[#6E6E73]">
+                  {candidate.straight_line_km !== null
+                    ? `${candidate.straight_line_km.toFixed(1)} km away`
+                    : "Distance unknown"}
+                  {" · "}{candidate.tier}
+                  {candidate.expiring_24h > 0 && ` · ${candidate.expiring_24h} of their units expire within 24h`}
+                </p>
               </div>
               <button
-                onClick={() => setTransferReviewId(t.id || t.from)}
+                onClick={() => setTransferReviewId(candidate.id)}
                 className="text-[13px] font-medium text-[#0071E3] bg-[#EAF2FC] px-4 py-2 rounded-full hover:bg-[#D5E8F9] transition-colors flex-shrink-0 cursor-pointer"
               >
-                Review transfer →
+                Request units →
               </button>
             </div>
           </div>
@@ -372,43 +395,59 @@ export default function ActionsScreen() {
       )}
 
       {/* Review Transfer Opportunity Drawer */}
-      {transferReviewId && (
+      {transferReviewId && selectedTransferOpp && (
         <Drawer
-          title="Review Transfer Opportunity"
-          subtitle={selectedTransferOpp ? `${selectedTransferOpp.from} → GGH Chennai` : "Inter-bank Transfer"}
+          title="Request units"
+          subtitle={`${user?.bank_name} ← ${selectedTransferOpp.short_name}`}
           onClose={() => setTransferReviewId(null)}
         >
           <div className="space-y-5">
             <div className="bg-[#E8F2FD] rounded-[12px] p-5 border border-[#B5D4F4]">
-              <p className="text-[14px] font-bold text-[#0071E3] mb-1">
-                {selectedTransferOpp?.from || "Bangalore Urban"} Transfer Opportunity
-              </p>
+              <p className="text-[14px] font-bold text-[#0071E3] mb-1">{selectedTransferOpp.name}</p>
               <p className="text-[13px] text-[#1D1D1F] leading-relaxed">
-                {selectedTransferOpp?.reason || selectedTransferOpp?.reason_summary || "Surplus stock identified at regional blood bank with zero local deficit."}
+                {selectedTransferOpp.address}
               </p>
             </div>
+
             <div>
-              <SectionLabel>Transfer Details</SectionLabel>
+              <SectionLabel>What they currently hold</SectionLabel>
               <div className="space-y-3">
                 <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                  <span className="text-[13px] text-[#6E6E73]">Available Units</span>
-                  <span className="text-[14px] font-bold text-[#0071E3]">{selectedTransferOpp?.units || selectedTransferOpp?.potential_quantity || 60} SDP units</span>
+                  <span className="text-[13px] text-[#6E6E73]">Usable SDP units</span>
+                  <span className="text-[14px] font-bold text-[#0071E3]">{selectedTransferOpp.available_units}</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                  <span className="text-[13px] text-[#6E6E73]">Source Freshness</span>
-                  <span className="text-[13px] font-bold text-[#1A8A2C]">12h · CURRENT</span>
+                  <span className="text-[13px] text-[#6E6E73]">Expiring within 24h</span>
+                  <span className="text-[13px] font-bold text-[#1D1D1F]">{selectedTransferOpp.expiring_24h}</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                  <span className="text-[13px] text-[#6E6E73]">Destination</span>
-                  <span className="text-[13px] font-bold text-[#1D1D1F]">Govt. General Hospital Chennai</span>
+                  <span className="text-[13px] text-[#6E6E73]">Distance</span>
+                  <span className="text-[13px] font-bold text-[#1D1D1F]">
+                    {selectedTransferOpp.straight_line_km !== null
+                      ? `${selectedTransferOpp.straight_line_km.toFixed(1)} km`
+                      : "Unknown"}
+                  </span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
+                  <span className="text-[13px] text-[#6E6E73]">eRaktKosh code</span>
+                  <span className="text-[13px] font-mono text-[#1D1D1F]">{selectedTransferOpp.code}</span>
                 </div>
               </div>
             </div>
+
+            <p className="text-[12px] text-[#6E6E73] leading-relaxed">
+              This sends a request. {selectedTransferOpp.short_name} decides whether to release the
+              units, and controls the handover with a one-time code.
+            </p>
+
             <button
-              onClick={() => offerMutation.mutate({ oppId: selectedTransferOpp?.id || "opp-001", quantity: selectedTransferOpp?.units || 60 })}
-              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
+              onClick={() =>
+                requestUnitsMutation.mutate({ facilityId: selectedTransferOpp.id, units: 12 })
+              }
+              disabled={requestUnitsMutation.isPending}
+              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer disabled:opacity-50"
             >
-              Request Inter-Bank Transfer
+              {requestUnitsMutation.isPending ? "Sending…" : "Request 12 SDP units"}
             </button>
           </div>
         </Drawer>

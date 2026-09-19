@@ -129,7 +129,7 @@ export default function WasteRecoveryScreen() {
             <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#AEAEB2" }} axisLine={false} tickLine={false} />
             <YAxis tick={{ fontSize: 10, fill: "#AEAEB2" }} axisLine={false} tickLine={false} domain={[0, 12]} tickFormatter={(v: number) => `${v}%`} />
             <Tooltip
-              formatter={(v: number) => [`${v}%`, "Wastage"]}
+              formatter={(value) => [`${value}%`, "Wastage"] as [string, string]}
               contentStyle={{ fontSize: 12, borderRadius: 10, border: "1px solid #E5E5E7", boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}
             />
             <ReferenceLine y={9.61} stroke="#B25000" strokeDasharray="4 2" label={{ value: "Baseline 9.61%", position: "insideTopRight", fontSize: 10, fill: "#B25000" }} />

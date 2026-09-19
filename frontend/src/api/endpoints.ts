@@ -1,235 +1,215 @@
 import { apiClient } from "./client";
+import type {
+  AuthConfig,
+  Counterparty,
+  Facility,
+  SessionUser,
+  TrackedTransfer,
+  Transfer,
+} from "./types";
 
-const BANK_ID = "TN-GGH-001";
+/**
+ * The facility this session is signed in at.
+ *
+ * Set once by AuthContext when a facility is chosen. Bank-scoped endpoints read
+ * it rather than a module constant, so the same build serves any facility and
+ * two laptops running it behave as two different hospitals.
+ */
+let activeBankId: string | null = null;
+
+export function setActiveBankId(bankId: string | null): void {
+  activeBankId = bankId;
+}
+
+export function getActiveBankId(): string | null {
+  return activeBankId;
+}
+
+function requireBankId(): string {
+  if (!activeBankId) {
+    throw new Error("No facility selected for this session.");
+  }
+  return activeBankId;
+}
+
+async function unwrap<T>(promise: Promise<{ data: { data: T } }>): Promise<T> {
+  const response = await promise;
+  return response.data.data;
+}
+
+/**
+ * Same unwrap, but deliberately untyped.
+ *
+ * The forecast/inventory/analytics screens predate the typed API layer and
+ * read these payloads structurally. Giving them a real model is worth doing,
+ * but inventing one here would be a guess — so they keep the shape they have
+ * always had until each screen is migrated.
+ */
+async function unwrapUntyped(promise: Promise<{ data: { data: unknown } }>): Promise<any> {
+  const response = await promise;
+  return response.data.data;
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
 
 export const authApi = {
-  getMe: async () => {
-    const res = await apiClient.get("/auth/me");
-    return res.data.data;
-  },
-  googleStart: async () => {
-    const res = await apiClient.get("/auth/google/start");
-    return res.data.data;
-  },
-  googleCallback: async () => {
-    const res = await apiClient.get("/auth/google/callback");
-    return res.data.data;
-  },
-  logout: async () => {
-    const res = await apiClient.post("/auth/logout");
-    return res.data.data;
-  },
+  getConfig: (): Promise<AuthConfig> => unwrap(apiClient.get("/auth/config")),
+
+  getMe: (): Promise<SessionUser & { facility_required: boolean }> =>
+    unwrap(apiClient.get("/auth/me")),
+
+  /** Exchange a Google Identity Services credential for an identity token. */
+  verifyGoogleCredential: (
+    credential: string,
+  ): Promise<{ token: string; user: SessionUser; facility_required: boolean }> =>
+    unwrap(apiClient.post("/auth/google/verify", { credential })),
+
+  startGoogleRedirect: (): Promise<{ redirect_url: string }> =>
+    unwrap(apiClient.get("/auth/google/start")),
+
+  /** Local sign-in; only works when the server sets ALLOW_DEV_SIGNIN=1. */
+  devSignIn: (
+    email: string,
+    name?: string,
+  ): Promise<{ token: string; user: SessionUser; facility_required: boolean }> =>
+    unwrap(apiClient.post("/auth/dev-signin", { email, name })),
+
+  selectFacility: (
+    facilityId: string,
+    role = "OFFICER",
+  ): Promise<{ token: string; user: SessionUser; facility: Facility }> =>
+    unwrap(apiClient.post("/auth/select-facility", { facility_id: facilityId, role })),
+
+  getMemberships: (): Promise<{ role: string; facility: Facility }[]> =>
+    unwrap(apiClient.get("/auth/memberships")),
 };
 
+// ── Facility registry ────────────────────────────────────────────────────────
+
+export const facilityApi = {
+  list: (options?: { includeStock?: boolean; near?: string }): Promise<Facility[]> =>
+    unwrap(
+      apiClient.get("/facilities", {
+        params: { include_stock: options?.includeStock ?? true, near: options?.near },
+      }),
+    ),
+
+  get: (facilityId: string): Promise<Facility> => unwrap(apiClient.get(`/facilities/${facilityId}`)),
+
+  /** Facilities we could transfer with, nearest first, with their live stock. */
+  counterparties: (componentType = "SDP"): Promise<Counterparty[]> =>
+    unwrap(
+      apiClient.get(`/facilities/${requireBankId()}/counterparties`, {
+        params: { component_type: componentType },
+      }),
+    ),
+};
+
+// ── Transfers ────────────────────────────────────────────────────────────────
+
+export interface CreateTransferPayload {
+  counterparty_bank_id: string;
+  direction: "SHORTAGE_PULL" | "WASTAGE_PUSH";
+  units: number;
+  component_type: string;
+  blood_group?: string | null;
+  priority?: string;
+  reason?: string | null;
+  provider?: string | null;
+}
+
+export const transferApi = {
+  list: (scope: "all" | "incoming" | "outgoing" | "active" = "all"): Promise<Transfer[]> =>
+    unwrap(apiClient.get("/transfers", { params: { scope } })),
+
+  get: (id: string): Promise<Transfer> => unwrap(apiClient.get(`/transfers/${id}`)),
+
+  track: (id: string): Promise<TrackedTransfer> => unwrap(apiClient.get(`/transfers/${id}/track`)),
+
+  create: (payload: CreateTransferPayload): Promise<Transfer> =>
+    unwrap(apiClient.post("/transfers", payload)),
+
+  /**
+   * Sender authorises. The response carries `pickup_otp_code` — the only time
+   * that code is ever returned, and only to the facility that issued it.
+   */
+  accept: (id: string): Promise<Transfer> => unwrap(apiClient.post(`/transfers/${id}/accept`)),
+
+  decline: (id: string, reason?: string): Promise<Transfer> =>
+    unwrap(apiClient.post(`/transfers/${id}/decline`, { reason })),
+
+  cancel: (id: string, reason?: string): Promise<Transfer> =>
+    unwrap(apiClient.post(`/transfers/${id}/cancel`, { reason })),
+
+  reissuePickupOtp: (id: string): Promise<{ transfer_id: string; otp_code: string; expires_at: string }> =>
+    unwrap(apiClient.post(`/transfers/${id}/pickup/reissue`)),
+
+  /** Sender issues a fresh receipt code when the first was lost off-screen. */
+  reissueDeliveryOtp: (
+    id: string,
+  ): Promise<{ transfer_id: string; otp_code: string; expires_at: string; verifier_bank_id: string }> =>
+    unwrap(apiClient.post(`/transfers/${id}/delivery/reissue`)),
+
+  /** Sender confirms handover. Response carries the receipt code for the receiver. */
+  verifyPickup: (id: string, otp: string): Promise<Transfer> =>
+    unwrap(apiClient.post(`/transfers/${id}/pickup/verify`, { otp })),
+
+  /** Receiver redeems the sender's receipt code. This settles both ledgers. */
+  verifyDelivery: (id: string, otp: string): Promise<Transfer> =>
+    unwrap(apiClient.post(`/transfers/${id}/delivery/verify`, { otp })),
+};
+
+// ── Bank-scoped operational data ─────────────────────────────────────────────
+
 export const inventoryApi = {
-  getSummary: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/inventory/summary`);
-    return res.data.data;
-  },
-  getUnits: async (params?: any) => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/inventory/units`, { params });
-    return res.data.data;
-  },
-  registerUnit: async (payload: any) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/inventory/units`, payload);
-    return res.data.data;
-  },
-  issueUnit: async (unitId: string, payload?: any) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/inventory/units/${unitId}/issue`, payload);
-    return res.data.data;
-  },
-  disposeUnit: async (unitId: string, payload?: any) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/inventory/units/${unitId}/dispose`, payload);
-    return res.data.data;
-  },
+  getSummary: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/inventory/summary`)),
+  getUnits: (params?: Record<string, unknown>) =>
+    unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/inventory/units`, { params })),
+  registerUnit: (payload: unknown) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/inventory/units`, payload)),
+  issueUnit: (unitId: string, payload?: unknown) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/inventory/units/${unitId}/issue`, payload)),
+  disposeUnit: (unitId: string, payload?: unknown) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/inventory/units/${unitId}/dispose`, payload)),
 };
 
 export const forecastApi = {
-  getLatest: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/forecast/latest`);
-    return res.data.data;
-  },
-  triggerRun: async () => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/forecast/runs`);
-    return res.data.data;
-  },
-  uploadHistory: async (formData: FormData) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/forecast/upload-history`, formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-    return res.data.data;
-  },
+  getLatest: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/forecast/latest`)),
+  triggerRun: () => unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/forecast/runs`)),
+  uploadHistory: (formData: FormData) =>
+    unwrapUntyped(
+      apiClient.post(`/banks/${requireBankId()}/forecast/upload-history`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      }),
+    ),
 };
 
 export const recommendationApi = {
-  getCurrent: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/recommendation/current`);
-    return res.data.data;
-  },
-  confirm: async (id: string) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/recommendations/${id}/confirm`);
-    return res.data.data;
-  },
-  adjust: async (id: string, payload: { quantity: number; reason: string }) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/recommendations/${id}/adjust`, payload);
-    return res.data.data;
-  },
+  getCurrent: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/recommendation/current`)),
+  confirm: (id: string) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/recommendations/${id}/confirm`)),
+  adjust: (id: string, payload: { quantity: number; reason: string }) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/recommendations/${id}/adjust`, payload)),
 };
 
 export const requisitionApi = {
-  list: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/requisitions`);
-    return res.data.data;
-  },
-  create: async (payload: any) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/requisitions`, payload);
-    return res.data.data;
-  },
-  fulfill: async (id: string, payload?: any) => {
-    const res = await apiClient.post(`/banks/${BANK_ID}/requisitions/${id}/fulfill`, payload);
-    return res.data.data;
-  },
-};
-
-export const transferApi = {
-  getOpportunities: async () => {
-    try {
-      const res = await apiClient.get(`/banks/${BANK_ID}/transfers/opportunities`);
-      if (res.data?.data && Array.isArray(res.data.data) && res.data.data.length > 0) {
-        return res.data.data;
-      }
-    } catch (e) {
-      console.warn("Transfer network API fallback active:", e);
-    }
-    return [
-      {
-        id: "opp-001",
-        from: "Govt. Stanley Medical College Hospital",
-        to: "Govt. General Hospital Chennai",
-        units: 12,
-        component_type: "SDP",
-        reason: "Stanley surplus stock available for intra-city balancing. 12 SDP units usable with zero expected local deficit.",
-        status: "OPEN",
-      },
-      {
-        id: "opp-002",
-        from: "Kilpauk Medical College Hospital",
-        to: "Apollo Hospitals Greams Road",
-        units: 15,
-        component_type: "SDP",
-        reason: "Kilpauk regional surplus available for high-demand emergency redistribution.",
-        status: "OPEN",
-      },
-      {
-        id: "opp-003",
-        from: "MGM Healthcare Adyar",
-        to: "Govt. General Hospital Chennai",
-        units: 20,
-        component_type: "RDP",
-        reason: "MGM surplus stock ready for intra-regional balancing.",
-        status: "OPEN",
-      },
-    ];
-  },
-  listTransfers: async () => {
-    try {
-      const res = await apiClient.get("/transfers");
-      if (res.data?.data && Array.isArray(res.data.data)) {
-        return res.data.data;
-      }
-    } catch (e) {
-      console.warn("Transfer list API error, falling back:", e);
-    }
-    return [];
-  },
-  createTransfer: async (payload: any) => {
-    try {
-      const res = await apiClient.post("/transfers", payload);
-      return res.data.data;
-    } catch (e) {
-      console.warn("Transfer creation error:", e);
-      return { id: `TRF-${Date.now()}`, ...payload, status: "REQUESTED" };
-    }
-  },
-  acceptTransfer: async (id: string) => {
-    try {
-      const res = await apiClient.post(`/transfers/${id}/accept`);
-      return res.data.data;
-    } catch (e) {
-      return { id, status: "UNITS_RESERVED" };
-    }
-  },
-  verifyPickupOtp: async (id: string, otp: string) => {
-    try {
-      const res = await apiClient.post(`/transfers/${id}/pickup/verify`, { otp });
-      return res.data.data;
-    } catch (e) {
-      return { id, status: "IN_TRANSIT" };
-    }
-  },
-  verifyDeliveryOtp: async (id: string, otp: string) => {
-    try {
-      const res = await apiClient.post(`/transfers/${id}/delivery/verify`, { otp });
-      return res.data.data;
-    } catch (e) {
-      return { id, status: "TRANSFER_COMPLETED" };
-    }
-  },
-  makeOffer: async (oppId: string, payload: { quantity: number }) => {
-    try {
-      const res = await apiClient.post(`/banks/${BANK_ID}/transfers/opportunities/${oppId}/offer`, payload);
-      return res.data.data;
-    } catch (e) {
-      return { id: oppId, status: "OFFERED", quantity: payload.quantity };
-    }
-  },
-  acceptOffer: async (offerId: string) => {
-    try {
-      const res = await apiClient.post(`/banks/${BANK_ID}/transfers/offers/${offerId}/accept`);
-      return res.data.data;
-    } catch (e) {
-      return { id: offerId, status: "ACCEPTED" };
-    }
-  },
-  completeTransfer: async (offerId: string) => {
-    try {
-      const res = await apiClient.post(`/banks/${BANK_ID}/transfers/offers/${offerId}/complete`);
-      return res.data.data;
-    } catch (e) {
-      return { id: offerId, status: "COMPLETED" };
-    }
-  },
-};
-
-export const networkApi = {
-  getNetwork: async () => {
-    const res = await apiClient.get("/network");
-    return res.data.data;
-  },
-  getRisks: async () => {
-    const res = await apiClient.get("/network/risks");
-    return res.data.data;
-  },
+  list: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/requisitions`)),
+  create: (payload: unknown) => unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/requisitions`, payload)),
+  fulfill: (id: string, payload?: unknown) =>
+    unwrapUntyped(apiClient.post(`/banks/${requireBankId()}/requisitions/${id}/fulfill`, payload)),
 };
 
 export const analyticsApi = {
-  getForecastAnalytics: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/analytics/forecast`);
-    return res.data.data;
-  },
-  getWasteAnalytics: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/analytics/waste`);
-    return res.data.data;
-  },
-  getModelHealth: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/analytics/model-health`);
-    return res.data.data;
-  },
+  getForecastAnalytics: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/analytics/forecast`)),
+  getWasteAnalytics: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/analytics/waste`)),
+  getModelHealth: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/analytics/model-health`)),
 };
 
 export const campApi = {
-  getSeasonal: async () => {
-    const res = await apiClient.get(`/banks/${BANK_ID}/camps/seasonal`);
-    return res.data.data;
-  },
+  getSeasonal: () => unwrapUntyped(apiClient.get(`/banks/${requireBankId()}/camps/seasonal`)),
+};
+
+export const networkApi = {
+  getNetwork: () => unwrapUntyped(apiClient.get("/network")),
+  getRisks: () => unwrapUntyped(apiClient.get("/network/risks")),
 };

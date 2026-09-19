@@ -1,683 +1,868 @@
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, SectionLabel, Drawer, ProvenanceBadge } from "../shared";
-import { transferApi } from "../api/endpoints";
-import { LoadingSkeleton } from "../components/LoadingSkeleton";
+import { useCallback, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "../contexts/AuthContext";
+import { facilityApi, transferApi } from "../api/endpoints";
+import type { Counterparty, Transfer } from "../api/types";
+import { CodeEntry, IssuedCodeCard } from "../components/OtpPanels";
 
-const ERAKTKOSH_FACILITIES = [
-  { id: "TN-GGH-001", name: "Govt. General Hospital Chennai", role: "Surplus Holding Bank (48 SDP)", sdp: 48, lat: 13.0827, lng: 80.2707 },
-  { id: "TN-APO-014", name: "Apollo Hospitals Greams Road", role: "High Demand Deficit (Shortage)", sdp: 14, lat: 13.0604, lng: 80.2496 },
-  { id: "TN-STA-002", name: "Govt. Stanley Medical College Hospital", role: "Regional Deficit (19 SDP)", sdp: 19, lat: 13.1042, lng: 80.2872 },
-  { id: "TN-KMH-003", name: "Kilpauk Medical College Hospital", role: "Critical Shortage (8 SDP)", sdp: 8, lat: 13.0789, lng: 80.2428 },
-  { id: "TN-MGM-005", name: "MGM Healthcare Adyar", role: "Surplus Reserve (22 SDP)", sdp: 22, lat: 13.0084, lng: 80.2571 },
-];
+/** How often each console re-reads the shared state. */
+const POLL_INTERVAL_MS = 2500;
 
-export default function TransfersScreen({ onViewTracking }: { onViewTracking?: () => void }) {
+/**
+ * Codes the API has handed this console, keyed by transfer.
+ *
+ * This lives above the card list on purpose. A card moves between the
+ * "needs your action" and "in progress" sections as its status advances, which
+ * remounts it and would wipe component state — losing a code that the API will
+ * never return again. Holding it here keeps it on screen across that move.
+ *
+ * In memory only: nothing is written to storage. If the tab is reloaded the
+ * code is gone, and the sender re-issues it, which supersedes the old one.
+ */
+interface IssuedCodes {
+  pickup?: { code: string; expiresAt?: string };
+  delivery?: { code: string; expiresAt?: string };
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  REQUESTED: "Awaiting the sending facility",
+  ACCEPTED: "Authorised",
+  UNITS_RESERVED: "Units reserved",
+  SHIPMENT_CREATED: "Courier booked",
+  AWB_ASSIGNED: "Airway bill assigned",
+  PICKUP_OTP_REQUIRED: "Awaiting pickup confirmation",
+  IN_TRANSIT: "In transit",
+  ARRIVED: "Arrived — awaiting receipt code",
+  DELIVERY_OTP_REQUIRED: "Awaiting receipt code",
+  TRANSFER_COMPLETED: "Delivered and settled",
+  DECLINED: "Declined",
+  CANCELLED: "Cancelled",
+  FAILED: "Dispatch failed",
+};
+
+const STATUS_TONES: Record<string, { bg: string; fg: string }> = {
+  REQUESTED: { bg: "#FFF4E5", fg: "#9A5B00" },
+  IN_TRANSIT: { bg: "#E8F1FD", fg: "#0058B0" },
+  ARRIVED: { bg: "#E8F1FD", fg: "#0058B0" },
+  TRANSFER_COMPLETED: { bg: "#E7F5EA", fg: "#1A7431" },
+  DECLINED: { bg: "#FDECEC", fg: "#B3261E" },
+  CANCELLED: { bg: "#F0F0F2", fg: "#6E6E73" },
+  FAILED: { bg: "#FDECEC", fg: "#B3261E" },
+};
+
+export default function TransfersScreen({ onViewTracking }: { onViewTracking?: (id: string) => void }) {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
+  const bankId = user?.bank_id ?? null;
 
-  const [activeBankId, setActiveBankId] = useState<string>("TN-GGH-001");
-  const [selectedProvider, setSelectedProvider] = useState<string>("shiprocket");
-  const [pendingMsg, setPendingMsg] = useState<string | null>(null);
+  const [composer, setComposer] = useState<"SHORTAGE_PULL" | "WASTAGE_PUSH" | null>(null);
+  const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const [issuedCodes, setIssuedCodes] = useState<Record<string, IssuedCodes>>({});
 
-  // Transfer Modals State
-  const [shortagePullOpen, setShortagePullOpen] = useState(false);
-  const [wastagePushOpen, setWastagePushOpen] = useState(false);
-  const [otpModalOpen, setOtpModalOpen] = useState<"pickup" | "delivery" | null>(null);
-  const [otpInput, setOtpInput] = useState<string>("");
-  const [reviewId, setReviewId] = useState<string | null>(null);
-
-  // Pull / Push Form Inputs
-  const [targetBankId, setTargetBankId] = useState<string>("TN-APO-014");
-  const [reqUnits, setReqUnits] = useState<number>(12);
-  const [reqComponent, setReqComponent] = useState<string>("SDP");
-
-  // Operational Transfer State Machine
-  const [localState, setLocalState] = useState<string>("REQUESTED");
-  const [pickupOtp, setPickupOtp] = useState<string>("849201");
-  const [deliveryOtp, setDeliveryOtp] = useState<string>("123456");
-
-  const activeFacility = ERAKTKOSH_FACILITIES.find((f) => f.id === activeBankId) || ERAKTKOSH_FACILITIES[0];
-
-  // 1. Fetch Candidate Opportunities
-  const { data: opps, isLoading } = useQuery({
-    queryKey: ["transferOpportunities"],
-    queryFn: transferApi.getOpportunities,
-  });
-
-  // 2. Poll Central Backend API for Real-Time 2-Laptop Transfer Sync (every 2000ms)
-  const { data: liveTransfers } = useQuery({
-    queryKey: ["liveTransfers"],
-    queryFn: transferApi.listTransfers,
-    refetchInterval: 2000,
-  });
-
-  const activeBackendTransfer = liveTransfers && liveTransfers.length > 0 ? liveTransfers[liveTransfers.length - 1] : null;
-  const transferState = activeBackendTransfer?.status || localState;
-  const activeTransferId = activeBackendTransfer?.id || "TRF-DEMO-001";
-
-  // Backend Mutations for Live 2-Laptop Sync
-  const createMutation = useMutation({
-    mutationFn: (payload: any) => transferApi.createTransfer(payload),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
-      setLocalState(data.status || "REQUESTED");
-      if (data.pickup_otp_code) setPickupOtp(data.pickup_otp_code);
+  const rememberCode = useCallback(
+    (transferId: string, kind: keyof IssuedCodes, code: string, expiresAt?: string) => {
+      setIssuedCodes((current) => ({
+        ...current,
+        [transferId]: { ...current[transferId], [kind]: { code, expiresAt } },
+      }));
     },
+    [],
+  );
+
+  /**
+   * Both consoles poll the same endpoint. An action taken on one laptop shows
+   * up on the other within one interval — there is no local mirror of the
+   * state, so the two screens cannot disagree.
+   */
+  const { data: transfers, isLoading, error } = useQuery({
+    queryKey: ["transfers", bankId],
+    queryFn: () => transferApi.list("all"),
+    refetchInterval: POLL_INTERVAL_MS,
+    enabled: Boolean(bankId),
   });
 
-  const acceptMutation = useMutation({
-    mutationFn: (id: string) => transferApi.acceptTransfer(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
-      setLocalState("UNITS_RESERVED");
-    },
-  });
+  const { incoming, outgoing, history } = useMemo(() => {
+    const rows = transfers ?? [];
+    return {
+      // Anything waiting on an action from this console.
+      incoming: rows.filter((t) => needsMyAction(t)),
+      outgoing: rows.filter((t) => !needsMyAction(t) && !isFinished(t)),
+      history: rows.filter(isFinished),
+    };
+  }, [transfers]);
 
-  const verifyPickupOtpMutation = useMutation({
-    mutationFn: ({ id, otp }: { id: string; otp: string }) => transferApi.verifyPickupOtp(id, otp),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
-      setLocalState("IN_TRANSIT");
-    },
-  });
-
-  const verifyDeliveryOtpMutation = useMutation({
-    mutationFn: ({ id, otp }: { id: string; otp: string }) => transferApi.verifyDeliveryOtp(id, otp),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["liveTransfers"] });
-      setLocalState("TRANSFER_COMPLETED");
-    },
-  });
-
-  const offerMutation = useMutation({
-    mutationFn: ({ oppId, quantity }: { oppId: string; quantity: number }) =>
-      transferApi.makeOffer(oppId, { quantity }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["transferOpportunities"] });
-      setPendingMsg("Transfer Approved! 12 SDP units reserved (AVAILABLE → UNITS_RESERVED). Shiprocket ad-hoc dispatch created.");
-      setReviewId(null);
-      setLocalState("UNITS_RESERVED");
-    },
-  });
-
-  // Flow A: Initiate Shortage Pull Request
-  const handleInitiateShortagePull = (e: React.FormEvent) => {
-    e.preventDefault();
-    setShortagePullOpen(false);
-    setLocalState("REQUESTED");
-
-    createMutation.mutate({
-      source_blood_bank_id: targetBankId,
-      destination_blood_bank_id: activeBankId,
-      units: reqUnits,
-      component: reqComponent,
-      priority: "high",
-      provider: selectedProvider,
-    });
-
-    setPendingMsg(`Shortage Pull Request transmitted to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Live synced across all network laptops.`);
-  };
-
-  // Flow B: Initiate Wastage Push (Expiry Prevention)
-  const handleInitiateWastagePush = (e: React.FormEvent) => {
-    e.preventDefault();
-    setWastagePushOpen(false);
-    setLocalState("UNITS_RESERVED");
-
-    createMutation.mutate({
-      source_blood_bank_id: activeBankId,
-      destination_blood_bank_id: targetBankId,
-      units: reqUnits,
-      component: reqComponent,
-      priority: "urgent",
-      provider: selectedProvider,
-    });
-
-    setPendingMsg(`Expiry Prevention Dispatch created! Offered ${reqUnits} ${reqComponent} units expiring <36h to ${ERAKTKOSH_FACILITIES.find(f => f.id === targetBankId)?.name}. Live synced.`);
-  };
-
-  // Authorize Transfer
-  const handleAuthorizeTransfer = () => {
-    acceptMutation.mutate(activeTransferId);
-    setLocalState("UNITS_RESERVED");
-    setPendingMsg("Transfer Authorized! 12 SDP units reserved in inventory. Pickup OTP generated: " + displayPickupOtp);
-  };
-
-  // OTP Verification Handoff
-  const handleVerifyOtp = () => {
-    if (otpInput.length !== 6) return;
-    if (otpModalOpen === "pickup") {
-      verifyPickupOtpMutation.mutate({ id: activeTransferId, otp: otpInput });
-      setPendingMsg("Pickup OTP verified! Custody transferred to courier. Shipment IN_TRANSIT.");
-    } else if (otpModalOpen === "delivery") {
-      verifyDeliveryOtpMutation.mutate({ id: activeTransferId, otp: otpInput });
-      setPendingMsg("Receipt OTP verified! Transfer completed. Inventory settled (Source −N, Destination +N).");
-    }
-    setOtpModalOpen(null);
-    setOtpInput("");
-  };
-
-  if (isLoading) {
-    return (
-      <div className="p-8 max-w-4xl space-y-6">
-        <LoadingSkeleton height="150px" />
-        <LoadingSkeleton height="240px" />
-      </div>
-    );
+  function refresh() {
+    queryClient.invalidateQueries({ queryKey: ["transfers", bankId] });
+    queryClient.invalidateQueries({ queryKey: ["facility", bankId] });
   }
 
-  const DEFAULT_OPPORTUNITIES = [
-    {
-      id: "opp-001",
-      from: "Govt. Stanley Medical College Hospital",
-      to: "Govt. General Hospital Chennai",
-      units: 12,
-      component_type: "SDP",
-      reason: "Stanley surplus stock available for intra-city balancing. 12 SDP units usable with zero expected local deficit.",
-      status: "OPEN",
-    },
-    {
-      id: "opp-002",
-      from: "Kilpauk Medical College Hospital",
-      to: "Apollo Hospitals Greams Road",
-      units: 15,
-      component_type: "SDP",
-      reason: "Kilpauk regional surplus available for high-demand emergency redistribution.",
-      status: "OPEN",
-    },
-    {
-      id: "opp-003",
-      from: "MGM Healthcare Adyar",
-      to: "Govt. General Hospital Chennai",
-      units: 20,
-      component_type: "RDP",
-      reason: "MGM surplus stock ready for intra-regional balancing.",
-      status: "OPEN",
-    },
-  ];
-
-  const opportunities = opps && Array.isArray(opps) && opps.length > 0 ? opps : DEFAULT_OPPORTUNITIES;
-  const selectedOpp = opportunities.find((o: any) => o.id === reviewId);
-
   return (
-    <div className="p-8 max-w-4xl">
-      {/* Production Facility Context Switcher Bar */}
-      <div className="mb-6 bg-white p-4 rounded-[14px] border border-[#E5E5E7] shadow-sm flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-[#E8F1FC] flex items-center justify-center text-[#0071E3] font-bold text-[15px]">
-            🏦
-          </div>
-          <div>
-            <p className="text-[10px] font-bold text-[#AEAEB2] uppercase tracking-widest">Active Hospital Facility Context</p>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#1A8A2C]" />
-              <span className="text-[15px] font-bold text-[#1D1D1F]">{activeFacility.name}</span>
-              <span className="text-[12px] font-semibold text-[#6E6E73]">({activeFacility.id})</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <label className="text-[11px] font-semibold text-[#6E6E73]">Switch Operational Facility:</label>
-          <select
-            value={activeBankId}
-            onChange={(e) => {
-              setActiveBankId(e.target.value);
-              setPendingMsg(`Switched context to ${ERAKTKOSH_FACILITIES.find(f => f.id === e.target.value)?.name}`);
-            }}
-            className="bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[13px] font-medium rounded-full px-3.5 py-1.5 focus:outline-none focus:border-[#0071E3] cursor-pointer"
-          >
-            {ERAKTKOSH_FACILITIES.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name} ({f.id})
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* Screen Title Bar */}
-      <div className="mb-6 flex items-center justify-between">
+    <div className="px-8 py-7 max-w-[1180px]">
+      <header className="flex flex-wrap items-start justify-between gap-4 mb-7">
         <div>
-          <h1 className="text-[28px] font-semibold text-[#1D1D1F] tracking-tight">
-            Transfers & Transport Dispatch
-          </h1>
-          <p className="text-[14px] text-[#6E6E73] mt-1">
-            Shortage Pull Requests · Expiry Wastage Transfers · Cold-Chain 20–24 °C Handoff
+          <h1 className="text-[26px] font-semibold text-[#1D1D1F] tracking-tight">Transfers</h1>
+          <p className="text-[14px] text-[#6E6E73] mt-1 max-w-[560px] leading-relaxed">
+            Pull units you are short of, or push units that would otherwise expire. Custody is
+            verified with a one-time code at each end.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex gap-2.5">
           <button
-            onClick={() => {
-              setTargetBankId("TN-GGH-001");
-              setShortagePullOpen(true);
-            }}
-            className="px-4 py-2 bg-[#0071E3] text-white text-[13px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors shadow-sm cursor-pointer"
+            onClick={() => setComposer("SHORTAGE_PULL")}
+            className="px-4 py-2.5 text-white text-[14px] font-medium rounded-full cursor-pointer transition-colors"
+            style={{ background: "#0071E3" }}
           >
-            + Request Units (Shortage Pull)
+            Request units
           </button>
           <button
-            onClick={() => {
-              setTargetBankId("TN-APO-014");
-              setWastagePushOpen(true);
-            }}
-            className="px-4 py-2 bg-[#BA7517] text-white text-[13px] font-semibold rounded-full hover:bg-[#9A5F10] transition-colors shadow-sm cursor-pointer"
+            onClick={() => setComposer("WASTAGE_PUSH")}
+            className="px-4 py-2.5 text-white text-[14px] font-medium rounded-full cursor-pointer transition-colors"
+            style={{ background: "#B26A00" }}
           >
-            ⚡ Dispatch Expiry Units (Wastage Push)
+            Offer expiring units
+          </button>
+        </div>
+      </header>
+
+      {banner && (
+        <div
+          className="rounded-[12px] px-4 py-3 mb-6 flex items-start justify-between gap-4"
+          style={
+            banner.tone === "ok"
+              ? { background: "#E7F5EA", border: "1px solid #B7E0C1" }
+              : { background: "#FDECEC", border: "1px solid #F5C6C6" }
+          }
+        >
+          <p className="text-[13px] leading-relaxed" style={{ color: banner.tone === "ok" ? "#1A7431" : "#B3261E" }}>
+            {banner.text}
+          </p>
+          <button onClick={() => setBanner(null)} className="text-[13px] opacity-60 cursor-pointer">Dismiss</button>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-[12px] px-5 py-4 mb-6" style={{ background: "#FDECEC", border: "1px solid #F5C6C6" }}>
+          <p className="text-[14px] font-medium text-[#B3261E]">Could not load transfers.</p>
+          <p className="text-[13px] text-[#B3261E] mt-1">{error instanceof Error ? error.message : "Unknown error."}</p>
+        </div>
+      )}
+
+      {isLoading && <p className="text-[14px] text-[#6E6E73]">Loading transfers…</p>}
+
+      <Section
+        title="Needs your action"
+        count={incoming.length}
+        empty="Nothing is waiting on you right now."
+        show={!isLoading}
+      >
+        {incoming.map((transfer) => (
+          <TransferCard
+            key={transfer.id}
+            transfer={transfer}
+            codes={issuedCodes[transfer.id]}
+            onCodeIssued={rememberCode}
+            onRefresh={refresh}
+            onBanner={setBanner}
+            onViewTracking={onViewTracking}
+          />
+        ))}
+      </Section>
+
+      <Section
+        title="In progress"
+        count={outgoing.length}
+        empty="No transfers are in flight."
+        show={!isLoading}
+      >
+        {outgoing.map((transfer) => (
+          <TransferCard
+            key={transfer.id}
+            transfer={transfer}
+            codes={issuedCodes[transfer.id]}
+            onCodeIssued={rememberCode}
+            onRefresh={refresh}
+            onBanner={setBanner}
+            onViewTracking={onViewTracking}
+          />
+        ))}
+      </Section>
+
+      {history.length > 0 && (
+        <Section title="Closed" count={history.length} empty="" show>
+          {history.slice(0, 12).map((transfer) => (
+            <TransferCard
+              key={transfer.id}
+              transfer={transfer}
+              codes={issuedCodes[transfer.id]}
+              onCodeIssued={rememberCode}
+              onRefresh={refresh}
+              onBanner={setBanner}
+              onViewTracking={onViewTracking}
+            />
+          ))}
+        </Section>
+      )}
+
+      {composer && (
+        <ComposerDrawer
+          direction={composer}
+          onClose={() => setComposer(null)}
+          onCreated={(transfer) => {
+            setComposer(null);
+            refresh();
+            setBanner({
+              tone: "ok",
+              text:
+                transfer.direction === "SHORTAGE_PULL"
+                  ? `Request ${transfer.id} sent to ${transfer.source.short_name}. They decide whether to release the units.`
+                  : `Offer ${transfer.id} sent to ${transfer.destination.short_name}.`,
+            });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Cards ────────────────────────────────────────────────────────────────────
+
+function TransferCard({
+  transfer,
+  codes,
+  onCodeIssued,
+  onRefresh,
+  onBanner,
+  onViewTracking,
+}: {
+  transfer: Transfer;
+  codes?: IssuedCodes;
+  onCodeIssued: (id: string, kind: keyof IssuedCodes, code: string, expiresAt?: string) => void;
+  onRefresh: () => void;
+  onBanner: (banner: { tone: "ok" | "error"; text: string }) => void;
+  onViewTracking?: (id: string) => void;
+}) {
+  const isSender = transfer.viewer_role === "SENDER";
+  const counterparty = isSender ? transfer.destination : transfer.source;
+  const tone = STATUS_TONES[transfer.status] ?? { bg: "#F0F0F2", fg: "#6E6E73" };
+
+  const pickupCode = codes?.pickup ?? null;
+  const receiptCode = codes?.delivery ?? null;
+  const [entry, setEntry] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  function fail(err: unknown) {
+    const message = err instanceof Error ? err.message : "The action failed.";
+    setActionError(message);
+    onBanner({ tone: "error", text: message });
+  }
+
+  const accept = useMutation({
+    mutationFn: () => transferApi.accept(transfer.id),
+    onSuccess: (result) => {
+      setActionError(null);
+      if (result.pickup_otp_code) {
+        onCodeIssued(transfer.id, "pickup", result.pickup_otp_code, result.pickup_otp_expires_at);
+      }
+      onRefresh();
+    },
+    onError: fail,
+  });
+
+  const decline = useMutation({
+    mutationFn: (reason: string) => transferApi.decline(transfer.id, reason),
+    onSuccess: () => { setActionError(null); onRefresh(); },
+    onError: fail,
+  });
+
+  const cancel = useMutation({
+    mutationFn: (reason: string) => transferApi.cancel(transfer.id, reason),
+    onSuccess: () => { setActionError(null); onRefresh(); },
+    onError: fail,
+  });
+
+  const reissue = useMutation({
+    mutationFn: () => transferApi.reissuePickupOtp(transfer.id),
+    onSuccess: (result) => {
+      setActionError(null);
+      onCodeIssued(transfer.id, "pickup", result.otp_code, result.expires_at);
+    },
+    onError: fail,
+  });
+
+  const reissueReceipt = useMutation({
+    mutationFn: () => transferApi.reissueDeliveryOtp(transfer.id),
+    onSuccess: (result) => {
+      setActionError(null);
+      onCodeIssued(transfer.id, "delivery", result.otp_code, result.expires_at);
+    },
+    onError: fail,
+  });
+
+  const verifyPickup = useMutation({
+    mutationFn: (code: string) => transferApi.verifyPickup(transfer.id, code),
+    onSuccess: (result) => {
+      setActionError(null);
+      setEntry("");
+      if (result.delivery_otp_code) {
+        onCodeIssued(transfer.id, "delivery", result.delivery_otp_code, result.delivery_otp_expires_at);
+      }
+      onRefresh();
+      onBanner({ tone: "ok", text: `${transfer.id} is on its way. Pass the receipt code to ${transfer.destination.short_name}.` });
+    },
+    onError: fail,
+  });
+
+  const verifyDelivery = useMutation({
+    mutationFn: (code: string) => transferApi.verifyDelivery(transfer.id, code),
+    onSuccess: (result) => {
+      setActionError(null);
+      setEntry("");
+      onRefresh();
+      onBanner({
+        tone: "ok",
+        text: `${result.settlement?.units_transferred ?? transfer.units} ${transfer.component_type} unit(s) received and added to your inventory.`,
+      });
+    },
+    onError: fail,
+  });
+
+  const busy =
+    accept.isPending || decline.isPending || cancel.isPending ||
+    reissue.isPending || reissueReceipt.isPending ||
+    verifyPickup.isPending || verifyDelivery.isPending;
+
+  return (
+    <article className="bg-white rounded-[14px] p-5 mb-3" style={{ border: "1px solid #E5E5E7" }}>
+      {/* Header row */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[280px] flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+              style={{ background: tone.bg, color: tone.fg }}
+            >
+              {STATUS_LABELS[transfer.status] ?? transfer.status}
+            </span>
+            <span
+              className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+              style={{ background: "#F0F0F2", color: "#6E6E73" }}
+            >
+              {isSender ? "You are sending" : "You are receiving"}
+            </span>
+            <span className="text-[11px] font-mono text-[#AEAEB2]">{transfer.id}</span>
+          </div>
+
+          <p className="text-[16px] font-semibold text-[#1D1D1F] mt-2.5 leading-snug">
+            {transfer.units} {transfer.component_type} unit{transfer.units === 1 ? "" : "s"}{" "}
+            {isSender ? "to" : "from"} {counterparty.short_name}
+          </p>
+
+          {transfer.reason && (
+            <p className="text-[13px] text-[#6E6E73] mt-1 leading-relaxed">{transfer.reason}</p>
+          )}
+          {transfer.decline_reason && (
+            <p className="text-[13px] mt-1 leading-relaxed" style={{ color: "#B3261E" }}>
+              {transfer.decline_reason}
+            </p>
+          )}
+        </div>
+
+        {transfer.route_geometry && (
+          <button
+            onClick={() => onViewTracking?.(transfer.id)}
+            className="text-[13px] font-medium px-3.5 py-2 rounded-full cursor-pointer transition-colors"
+            style={{ background: "#F0F0F2", color: "#1D1D1F" }}
+          >
+            Track shipment
+          </button>
+        )}
+      </div>
+
+      {/* Logistics facts */}
+      <div className="flex flex-wrap gap-x-8 gap-y-2 mt-4 pt-4" style={{ borderTop: "1px solid #F0F0F0" }}>
+        <Fact label="Distance" value={transfer.distance_km ? `${transfer.distance_km.toFixed(2)} km` : "—"} />
+        <Fact
+          label={transfer.status === "IN_TRANSIT" ? "ETA remaining" : "Routed ETA"}
+          value={
+            transfer.status === "IN_TRANSIT" && transfer.eta_remaining_minutes !== null
+              ? `${transfer.eta_remaining_minutes} min`
+              : transfer.eta_minutes !== null
+                ? `${transfer.eta_minutes} min`
+                : "—"
+          }
+        />
+        <Fact label="Courier" value={transfer.courier_name ?? "Not booked yet"} />
+        <Fact label="AWB" value={transfer.awb_code ?? "—"} mono />
+        {transfer.reserved_units > 0 && <Fact label="Reserved" value={`${transfer.reserved_units} units`} />}
+      </div>
+
+      {actionError && (
+        <p className="text-[13px] mt-3 leading-relaxed" style={{ color: "#B3261E" }}>{actionError}</p>
+      )}
+
+      {/* ── What this console can do right now ────────────────────────────── */}
+
+      {/* Sender: decide on an open request */}
+      {isSender && transfer.status === "REQUESTED" && (
+        <div className="mt-4 pt-4 flex flex-wrap gap-2.5" style={{ borderTop: "1px solid #F0F0F0" }}>
+          <button
+            onClick={() => accept.mutate()}
+            disabled={busy}
+            className="px-4 py-2.5 text-white text-[14px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+            style={{ background: "#1A7431" }}
+          >
+            {accept.isPending ? "Authorising…" : "Authorise and book courier"}
+          </button>
+          <button
+            onClick={() => decline.mutate("Below our own safety stock")}
+            disabled={busy}
+            className="px-4 py-2.5 text-[14px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+            style={{ background: "#F0F0F2", color: "#1D1D1F" }}
+          >
+            Decline
+          </button>
+          <p className="text-[12px] text-[#6E6E73] self-center leading-relaxed max-w-[340px]">
+            Authorising reserves the units, books the courier, and issues your pickup code.
+          </p>
+        </div>
+      )}
+
+      {/* Receiver: waiting on the other side */}
+      {!isSender && transfer.status === "REQUESTED" && (
+        <div className="mt-4 pt-4 flex flex-wrap items-center gap-3" style={{ borderTop: "1px solid #F0F0F0" }}>
+          <p className="text-[13px] text-[#6E6E73] flex-1 min-w-[260px] leading-relaxed">
+            Waiting for {transfer.source.short_name} to authorise. This page updates on its own.
+          </p>
+          {transfer.opened_by_bank_id === transfer.destination.id && (
+            <button
+              onClick={() => cancel.mutate("Withdrawn by the requesting facility")}
+              disabled={busy}
+              className="px-4 py-2 text-[13px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+              style={{ background: "#F0F0F2", color: "#1D1D1F" }}
+            >
+              Withdraw request
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Sender: hold the pickup code, confirm when the rider collects */}
+      {isSender && ["PICKUP_OTP_REQUIRED", "SHIPMENT_CREATED", "AWB_ASSIGNED", "UNITS_RESERVED"].includes(transfer.status) && (
+        <div className="mt-4 pt-4 grid gap-4 md:grid-cols-2" style={{ borderTop: "1px solid #F0F0F0" }}>
+          {pickupCode ? (
+            <IssuedCodeCard
+              code={pickupCode.code}
+              title="Your pickup code"
+              instruction="Give this to the rider when they collect the box, then confirm it here to release custody."
+              expiresAt={pickupCode.expiresAt}
+            />
+          ) : (
+            <div className="rounded-[14px] p-5" style={{ background: "#F5F5F7", border: "1px solid #E5E5E7" }}>
+              <p className="text-[13px] text-[#6E6E73] leading-relaxed">
+                A pickup code was issued to this facility. It is shown only once — if you no longer
+                have it, issue a new one.
+              </p>
+              <button
+                onClick={() => reissue.mutate()}
+                disabled={busy}
+                className="mt-3 px-4 py-2 text-[13px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+                style={{ background: "#1D1D1F", color: "white" }}
+              >
+                {reissue.isPending ? "Issuing…" : "Issue a new pickup code"}
+              </button>
+            </div>
+          )}
+
+          <div>
+            <p className="text-[13px] font-medium text-[#1D1D1F] mb-2.5">
+              Confirm pickup to dispatch
+            </p>
+            <CodeEntry
+              value={entry}
+              onChange={setEntry}
+              onComplete={(code) => verifyPickup.mutate(code)}
+              disabled={busy}
+            />
+            <button
+              onClick={() => verifyPickup.mutate(entry)}
+              disabled={busy || entry.length < 6}
+              className="mt-3 px-5 py-2.5 text-white text-[14px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+              style={{ background: "#0071E3" }}
+            >
+              {verifyPickup.isPending ? "Verifying…" : "Confirm pickup"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Sender in transit: carry the receipt code to the receiver */}
+      {isSender && transfer.status === "IN_TRANSIT" && (
+        <div className="mt-4 pt-4" style={{ borderTop: "1px solid #F0F0F0" }}>
+          {receiptCode ? (
+            <div className="md:max-w-[420px]">
+              <IssuedCodeCard
+                code={receiptCode.code}
+                title={`Receipt code for ${transfer.destination.short_name}`}
+                instruction={`Pass this to ${transfer.destination.short_name} through your usual channel. Only they can redeem it, and redeeming it is what moves the units onto their ledger.`}
+                expiresAt={receiptCode.expiresAt}
+              />
+            </div>
+          ) : (
+            <div className="rounded-[14px] p-5 md:max-w-[460px]" style={{ background: "#F5F5F7", border: "1px solid #E5E5E7" }}>
+              <p className="text-[13px] text-[#6E6E73] leading-relaxed">
+                In transit. The receipt code was issued at dispatch and shown once.{" "}
+                {transfer.destination.short_name} needs it to close the transfer — if you no longer
+                have it, issue a new one. The old code stops working immediately.
+              </p>
+              <button
+                onClick={() => reissueReceipt.mutate()}
+                disabled={busy}
+                className="mt-3 px-4 py-2 text-[13px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+                style={{ background: "#1D1D1F", color: "white" }}
+              >
+                {reissueReceipt.isPending ? "Issuing…" : "Issue a new receipt code"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Receiver: redeem the sender's code */}
+      {!isSender && ["IN_TRANSIT", "ARRIVED", "DELIVERY_OTP_REQUIRED"].includes(transfer.status) && (
+        <div className="mt-4 pt-4" style={{ borderTop: "1px solid #F0F0F0" }}>
+          <p className="text-[13px] font-medium text-[#1D1D1F]">
+            Enter the receipt code from {transfer.source.short_name}
+          </p>
+          <p className="text-[12px] text-[#6E6E73] mt-1 mb-3 leading-relaxed max-w-[460px]">
+            {transfer.delivery_otp.issued
+              ? "The sending facility holds this code. Check the box contents and the cold-chain seal before entering it — this is what adds the units to your inventory."
+              : "The sending facility has not confirmed pickup yet, so no receipt code exists."}
+          </p>
+          <CodeEntry
+            value={entry}
+            onChange={setEntry}
+            onComplete={(code) => verifyDelivery.mutate(code)}
+            disabled={busy || !transfer.delivery_otp.issued}
+          />
+          <button
+            onClick={() => verifyDelivery.mutate(entry)}
+            disabled={busy || entry.length < 6 || !transfer.delivery_otp.issued}
+            className="mt-3 px-5 py-2.5 text-white text-[14px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+            style={{ background: "#1A7431" }}
+          >
+            {verifyDelivery.isPending ? "Verifying…" : "Confirm receipt"}
+          </button>
+        </div>
+      )}
+
+      {transfer.status === "TRANSFER_COMPLETED" && (
+        <p className="text-[13px] mt-4 pt-4 leading-relaxed" style={{ borderTop: "1px solid #F0F0F0", color: "#1A7431" }}>
+          Settled. {transfer.units} {transfer.component_type} unit(s) moved from{" "}
+          {transfer.source.short_name} to {transfer.destination.short_name}.
+        </p>
+      )}
+    </article>
+  );
+}
+
+// ── Composer ─────────────────────────────────────────────────────────────────
+
+function ComposerDrawer({
+  direction,
+  onClose,
+  onCreated,
+}: {
+  direction: "SHORTAGE_PULL" | "WASTAGE_PUSH";
+  onClose: () => void;
+  onCreated: (transfer: Transfer) => void;
+}) {
+  const isPull = direction === "SHORTAGE_PULL";
+
+  const [componentType, setComponentType] = useState("SDP");
+  const [counterpartyId, setCounterpartyId] = useState<string | null>(null);
+  const [units, setUnits] = useState(12);
+  const [priority, setPriority] = useState("URGENT");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  // Candidates carry the other facility's live stock, so a pull can be aimed
+  // at somebody who actually has the units.
+  const { data: candidates, isLoading } = useQuery({
+    queryKey: ["counterparties", componentType],
+    queryFn: () => facilityApi.counterparties(componentType),
+  });
+
+  const sorted = useMemo(() => {
+    if (!candidates) return [];
+    if (isPull) {
+      // Most usable stock first — that is who can actually help.
+      return [...candidates].sort((a, b) => b.available_units - a.available_units);
+    }
+    // Pushing near-expiry units: nearest first, since shelf life is the constraint.
+    return [...candidates].sort(
+      (a, b) => (a.straight_line_km ?? Infinity) - (b.straight_line_km ?? Infinity),
+    );
+  }, [candidates, isPull]);
+
+  const create = useMutation({
+    mutationFn: () =>
+      transferApi.create({
+        counterparty_bank_id: counterpartyId!,
+        direction,
+        units,
+        component_type: componentType,
+        priority,
+        reason: reason.trim() || null,
+      }),
+    onSuccess: onCreated,
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not open the transfer."),
+  });
+
+  const chosen = sorted.find((candidate) => candidate.id === counterpartyId) ?? null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "rgba(0,0,0,0.35)" }} onClick={onClose}>
+      <div
+        className="w-full max-w-[520px] bg-white h-full overflow-y-auto"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-7 py-6 flex items-start justify-between" style={{ borderBottom: "1px solid #E5E5E7" }}>
+          <div>
+            <h2 className="text-[20px] font-semibold text-[#1D1D1F] tracking-tight">
+              {isPull ? "Request units" : "Offer expiring units"}
+            </h2>
+            <p className="text-[13px] text-[#6E6E73] mt-1 leading-relaxed max-w-[380px]">
+              {isPull
+                ? "Ask another facility to release units to you. They decide, and they control the handover."
+                : "Offer units you are unlikely to use before they expire. You remain the sender and control the handover."}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-[22px] text-[#AEAEB2] leading-none cursor-pointer">×</button>
+        </div>
+
+        <div className="px-7 py-6 space-y-6">
+          <Field label="Component">
+            <div className="flex gap-2">
+              {["SDP", "RDP"].map((option) => (
+                <button
+                  key={option}
+                  onClick={() => { setComponentType(option); setCounterpartyId(null); }}
+                  className="px-4 py-2 text-[14px] font-medium rounded-full cursor-pointer"
+                  style={
+                    componentType === option
+                      ? { background: "#1D1D1F", color: "white" }
+                      : { background: "#F0F0F2", color: "#6E6E73" }
+                  }
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label={isPull ? "Request from" : "Offer to"}>
+            {isLoading && <p className="text-[13px] text-[#6E6E73]">Loading facilities…</p>}
+            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+              {sorted.map((candidate) => (
+                <CandidateRow
+                  key={candidate.id}
+                  candidate={candidate}
+                  isPull={isPull}
+                  selected={candidate.id === counterpartyId}
+                  onSelect={() => setCounterpartyId(candidate.id)}
+                />
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Units">
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={units}
+              onChange={(event) => setUnits(Math.max(1, Number(event.target.value) || 1))}
+              className="w-32 bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[14px] rounded-[10px] px-3 py-2.5 focus:outline-none focus:border-[#0071E3]"
+            />
+            {isPull && chosen && units > chosen.available_units && (
+              <p className="text-[12px] mt-2 leading-relaxed" style={{ color: "#B26A00" }}>
+                {chosen.short_name} currently shows {chosen.available_units} usable {componentType} unit(s).
+                They will not be able to authorise more than that.
+              </p>
+            )}
+          </Field>
+
+          <Field label="Priority">
+            <div className="flex gap-2">
+              {["ROUTINE", "URGENT", "EMERGENCY"].map((option) => (
+                <button
+                  key={option}
+                  onClick={() => setPriority(option)}
+                  className="px-3.5 py-2 text-[13px] font-medium rounded-full cursor-pointer"
+                  style={
+                    priority === option
+                      ? { background: "#1D1D1F", color: "white" }
+                      : { background: "#F0F0F2", color: "#6E6E73" }
+                  }
+                >
+                  {option.charAt(0) + option.slice(1).toLowerCase()}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Clinical justification">
+            <textarea
+              rows={3}
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder={
+                isPull
+                  ? "e.g. 4 dengue patients below 10,000 platelet count, no SDP on hand"
+                  : "e.g. 6 SDP units expire in 14 hours, no scheduled demand"
+              }
+              className="w-full bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[14px] rounded-[10px] px-3 py-2.5 focus:outline-none focus:border-[#0071E3] resize-none"
+            />
+            <p className="text-[12px] text-[#AEAEB2] mt-1.5 leading-relaxed">
+              This is what the other facility sees when deciding.
+            </p>
+          </Field>
+
+          {error && (
+            <div className="rounded-[10px] px-4 py-3" style={{ background: "#FDECEC", border: "1px solid #F5C6C6" }}>
+              <p className="text-[13px] leading-relaxed" style={{ color: "#B3261E" }}>{error}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="px-7 py-5 sticky bottom-0 bg-white flex gap-3" style={{ borderTop: "1px solid #E5E5E7" }}>
+          <button
+            onClick={() => create.mutate()}
+            disabled={!counterpartyId || create.isPending}
+            className="flex-1 py-3 text-white text-[15px] font-medium rounded-full cursor-pointer disabled:opacity-50"
+            style={{ background: isPull ? "#0071E3" : "#B26A00" }}
+          >
+            {create.isPending ? "Sending…" : isPull ? "Send request" : "Send offer"}
+          </button>
+          <button
+            onClick={onClose}
+            className="px-5 py-3 text-[15px] font-medium rounded-full cursor-pointer"
+            style={{ background: "#F0F0F2", color: "#1D1D1F" }}
+          >
+            Cancel
           </button>
         </div>
       </div>
-
-      {pendingMsg && (
-        <div className="mb-5 px-4 py-3 bg-[#E8F1FC] border border-[#C8DCF5] rounded-[10px] flex items-center justify-between">
-          <p className="text-[13px] text-[#0071E3] font-medium">✓ {pendingMsg}</p>
-          <button onClick={() => setPendingMsg(null)} className="text-[#0071E3] text-[18px] leading-none">×</button>
-        </div>
-      )}
-
-      {/* Active Transfer Card */}
-      <Card className="p-6 mb-6 border-l-4 border-l-[#0071E3] bg-gradient-to-br from-white to-[#F9FAFB]">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className={`inline-block w-2.5 h-2.5 rounded-full ${transferState === "TRANSFER_COMPLETED" ? "bg-[#1A8A2C]" : "bg-[#0071E3] animate-pulse"}`} />
-            <SectionLabel>Active Transfer Lifecycle · {transferState.replace("_", " ")}</SectionLabel>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-[#E8F1FC] text-[#0071E3] border border-[#C8DCF5]">
-              AWB: {activeBackendTransfer?.awb_code || "AWB-SR-998877"}
-            </span>
-            <div className="flex items-center gap-1 bg-[#F5F5F7] px-2 py-0.5 rounded-full border border-[#E5E5E7] text-[11px] font-semibold text-[#1D1D1F]">
-              <span>PROVIDER:</span>
-              <select
-                value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value)}
-                className="bg-transparent text-[#0071E3] font-bold focus:outline-none cursor-pointer"
-              >
-                <option value="shiprocket">Shiprocket API</option>
-                <option value="porter">Porter API</option>
-                <option value="internal">Internal Fleet</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* Transfer Route & Logistics Summary */}
-        <div className="my-3 p-4 bg-white rounded-[12px] border border-[#E5E5E7] shadow-sm">
-          <div className="flex items-center justify-between text-[15px] font-semibold text-[#1D1D1F] mb-2">
-            <span>📍 {activeBackendTransfer?.source_name || "Govt. General Hospital Chennai"}</span>
-            <span className="text-[#0071E3]">→ {activeBackendTransfer?.units || 12} {activeBackendTransfer?.component || "SDP"} Units →</span>
-            <span>📍 {activeBackendTransfer?.destination_name || "Apollo Hospitals Greams Road"}</span>
-          </div>
-
-          <div className="grid grid-cols-4 gap-3 text-center my-3 py-2.5 bg-[#F5F5F7] rounded-[8px]">
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Mapbox ETA</p>
-              <p className="text-[15px] font-bold text-[#1D1D1F]">
-                {transferState === "TRANSFER_COMPLETED" ? "Arrived" : `${activeBackendTransfer?.eta_minutes || 18} mins`}
-              </p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Route Distance</p>
-              <p className="text-[15px] font-bold text-[#1D1D1F]">{activeBackendTransfer?.distance_km || 8.4} km</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Courier Partner</p>
-              <p className="text-[13px] font-bold text-[#0071E3]">{activeBackendTransfer?.courier_name || "Delhivery Express (Shiprocket)"}</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Rider Details</p>
-              <p className="text-[12px] font-semibold text-[#1D1D1F]">
-                {activeBackendTransfer?.driver?.name || "Ramesh V."} ({activeBackendTransfer?.driver?.vehicle || "TN-01-SR-8888"})
-              </p>
-            </div>
-          </div>
-
-          <div className="p-2.5 bg-[#FFF8E1] border border-[#FFE082] rounded-[8px] flex items-center justify-between text-[11px] text-[#B25000]">
-            <span><strong className="font-bold">🧊 Cold-Chain Monitoring:</strong> 22.4 °C (Target: 20–24 °C) · Agitation Off: 18 min / 1440 min max</span>
-            <span className="px-2 py-0.5 bg-[#E8F4EB] text-[#1A8A2C] font-bold rounded-full">● NORMAL</span>
-          </div>
-        </div>
-
-        {/* Verification Action Bar & Workflow Buttons */}
-        <div className="mt-4 pt-3 border-t border-[#E5E5E7] flex items-center justify-between">
-          <div>
-            <p className="text-[11px] uppercase font-bold text-[#AEAEB2]">Cryptographic OTP Handoff Security</p>
-            <p className="text-[12px] text-[#6E6E73]">
-              {transferState === "REQUESTED"
-                ? "Shortage Pull Request pending: Source giving officer must authorize transfer and issue Pickup OTP"
-                : transferState === "UNITS_RESERVED" || transferState === "PICKUP_PENDING"
-                ? "Source Handoff: Verify Pickup OTP with courier rider to dispatch shipment"
-                : transferState === "IN_TRANSIT"
-                ? "Destination Handoff: Verify Receipt OTP upon driver arrival to complete transfer"
-                : "Transfer Completed & Inventory Settled in eRaktKosh Ledger"}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {transferState === "REQUESTED" && (
-              <button
-                onClick={handleAuthorizeTransfer}
-                className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
-              >
-                Authorize & Accept Transfer →
-              </button>
-            )}
-
-            {(transferState === "UNITS_RESERVED" || transferState === "PICKUP_PENDING") && (
-              <button
-                onClick={() => setOtpModalOpen("pickup")}
-                className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
-              >
-                Verify Pickup OTP →
-              </button>
-            )}
-
-            {transferState === "IN_TRANSIT" && (
-              <>
-                <button
-                  onClick={() => onViewTracking?.()}
-                  className="px-3.5 py-2 bg-[#F5F5F7] text-[#1D1D1F] border border-[#E5E5E7] text-[12px] font-semibold rounded-full hover:bg-[#EAEAEA] transition-colors cursor-pointer"
-                >
-                  Live Flipkart Tracking 🗺
-                </button>
-                <button
-                  onClick={() => setOtpModalOpen("delivery")}
-                  className="px-4 py-2 bg-[#1A8A2C] text-white text-[12px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
-                >
-                  Verify Receipt OTP →
-                </button>
-              </>
-            )}
-
-            {transferState === "TRANSFER_COMPLETED" && (
-              <span className="px-3.5 py-1.5 bg-[#E8F4EB] text-[#1A8A2C] text-[12px] font-bold rounded-full border border-[#A5D6A7]">
-                ✓ Ledger & Inventory Settled
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* 10-State Lifecycle Progress Track */}
-        <div className="mt-4 pt-3 border-t border-[#E5E5E7]">
-          <p className="text-[11px] uppercase font-bold text-[#AEAEB2] mb-2">State Machine Lifecycle</p>
-          <div className="flex items-center justify-between text-[10px] font-medium text-[#6E6E73]">
-            <span className="text-[#1A8A2C] font-semibold">✓ Requested</span>
-            <span className={transferState !== "REQUESTED" ? "text-[#1A8A2C] font-semibold" : "text-[#0071E3] font-bold animate-pulse"}>
-              {transferState !== "REQUESTED" ? "✓ Approved" : "● Awaiting Approval"}
-            </span>
-            <span className={["UNITS_RESERVED", "PICKUP_PENDING", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
-              {["UNITS_RESERVED", "PICKUP_PENDING", "IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "✓ Reserved" : "○ Reserved"}
-            </span>
-            <span className={["IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
-              {["IN_TRANSIT", "TRANSFER_COMPLETED"].includes(transferState) ? "✓ Pickup Verified" : "○ Pickup OTP"}
-            </span>
-            <span className={transferState === "IN_TRANSIT" ? "text-[#0071E3] font-bold animate-pulse" : transferState === "TRANSFER_COMPLETED" ? "text-[#1A8A2C] font-semibold" : "text-[#AEAEB2]"}>
-              {transferState === "IN_TRANSIT" ? "● In Transit" : transferState === "TRANSFER_COMPLETED" ? "✓ In Transit" : "○ In Transit"}
-            </span>
-            <span className={transferState === "TRANSFER_COMPLETED" ? "text-[#1A8A2C] font-bold" : "text-[#AEAEB2]"}>
-              {transferState === "TRANSFER_COMPLETED" ? "✓ Delivery Verified" : "○ Receipt OTP"}
-            </span>
-          </div>
-        </div>
-      </Card>
-
-      {/* Eligible Candidate Transfers */}
-      <Card className="p-6 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <SectionLabel>Eligible Candidate Network Transfers</SectionLabel>
-          <ProvenanceBadge type="external" />
-        </div>
-        <p className="text-[12px] text-[#6E6E73] mb-4">
-          Evaluated via Mapbox Matrix travel times, shelf-life residual, and source transferable surplus.
-        </p>
-
-        <div className="space-y-3">
-          {opportunities.map((t: any) => (
-            <div key={t.id} className="border-l-4 border-l-[#0071E3] bg-[#F9F9FB] rounded-r-[10px] p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[14px] font-semibold text-[#1D1D1F]">
-                      {t.from} → {t.to}
-                    </span>
-                    <span className="text-[13px] text-[#6E6E73]">· {t.units} units</span>
-                  </div>
-                  <p className="text-[12px] text-[#6E6E73] mt-1">{t.reason}</p>
-                </div>
-                <button
-                  onClick={() => setReviewId(t.id)}
-                  className="text-[13px] font-medium text-[#0071E3] bg-[#E8F1FC] px-3.5 py-1.5 rounded-full hover:bg-[#D0E4F8] transition-colors flex-shrink-0 cursor-pointer"
-                >
-                  Review Transfer →
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {/* Shortage Pull Request Drawer Modal */}
-      {shortagePullOpen && (
-        <Drawer
-          title="Initiate Shortage Pull Request"
-          subtitle="Request platelet units from a network hospital with surplus stock"
-          onClose={() => setShortagePullOpen(false)}
-        >
-          <form onSubmit={handleInitiateShortagePull} className="space-y-4">
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Requesting Facility (Destination)</label>
-              <input
-                type="text"
-                disabled
-                value={activeFacility.name}
-                className="w-full bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Source Holding Bank (Giving Hospital)</label>
-              <select
-                value={targetBankId}
-                onChange={(e) => setTargetBankId(e.target.value)}
-                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
-              >
-                {ERAKTKOSH_FACILITIES.filter(f => f.id !== activeBankId).map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name} ({f.sdp} SDP Surplus Available)
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Component Type</label>
-                <select
-                  value={reqComponent}
-                  onChange={(e) => setReqComponent(e.target.value)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
-                >
-                  <option value="SDP">SDP (Single Donor Platelet)</option>
-                  <option value="RDP">RDP (Random Donor Platelet)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Requested Quantity (Units)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={reqUnits}
-                  onChange={(e) => setReqUnits(parseInt(e.target.value) || 1)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
-                />
-              </div>
-            </div>
-
-            <div className="p-3 bg-[#E8F1FC] border border-[#C8DCF5] rounded-[8px]">
-              <p className="text-[11px] text-[#0071E3] font-medium leading-relaxed">
-                ℹ Mapbox Directions route estimation: ~18 mins travel time (8.4 km). Pickup OTP will be issued upon source officer authorization.
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer shadow-sm"
-            >
-              Submit Shortage Pull Request →
-            </button>
-          </form>
-        </Drawer>
-      )}
-
-      {/* Expiry Wastage Push Drawer Modal */}
-      {wastagePushOpen && (
-        <Drawer
-          title="Dispatch Expiry Prevention Transfer (Wastage Push)"
-          subtitle="Transfer units expiring <48h to a hospital with immediate demand"
-          onClose={() => setWastagePushOpen(false)}
-        >
-          <form onSubmit={handleInitiateWastagePush} className="space-y-4">
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Source Hospital (Holding Expiring Stock)</label>
-              <input
-                type="text"
-                disabled
-                value={activeFacility.name}
-                className="w-full bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Target Receiving Hospital (Deficit Demand)</label>
-              <select
-                value={targetBankId}
-                onChange={(e) => setTargetBankId(e.target.value)}
-                className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
-              >
-                {ERAKTKOSH_FACILITIES.filter(f => f.id !== activeBankId).map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name} ({f.role})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Component</label>
-                <select
-                  value={reqComponent}
-                  onChange={(e) => setReqComponent(e.target.value)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium cursor-pointer"
-                >
-                  <option value="SDP">SDP (Expiring in 28h)</option>
-                  <option value="RDP">RDP (Expiring in 34h)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">Units to Transfer</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={30}
-                  value={reqUnits}
-                  onChange={(e) => setReqUnits(parseInt(e.target.value) || 1)}
-                  className="w-full bg-white border border-[#E5E5E7] text-[#1D1D1F] text-[13px] rounded-[8px] p-2.5 font-medium"
-                />
-              </div>
-            </div>
-
-            <div className="p-3 bg-[#FFF8E1] border border-[#FFE082] rounded-[8px]">
-              <p className="text-[11px] text-[#B25000] font-medium leading-relaxed">
-                ⚡ Prevent Wastage: Units will be locked in inventory and dispatched via Shiprocket ad-hoc courier under cold-chain surveillance (20–24 °C).
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-3 bg-[#BA7517] text-white text-[14px] font-semibold rounded-full hover:bg-[#9A5F10] transition-colors cursor-pointer shadow-sm"
-            >
-              Dispatch Expiry Transfer & Reserve Units →
-            </button>
-          </form>
-        </Drawer>
-      )}
-
-      {/* OTP / QR Verification Drawer Modal */}
-      {otpModalOpen && (
-        <Drawer
-          title={otpModalOpen === "pickup" ? "Source Pickup Handoff Verification" : "Destination Receipt Verification"}
-          subtitle="Dual Cryptographic OTP Security Gate"
-          onClose={() => setOtpModalOpen(null)}
-        >
-          <div className="space-y-5">
-            <div className="p-4 bg-[#E8F1FC] border border-[#C8DCF5] rounded-[10px]">
-              <p className="text-[13px] font-bold text-[#0071E3] mb-1">
-                {otpModalOpen === "pickup" ? "Courier Pickup Handoff Gate" : "Destination Handoff Receipt Gate"}
-              </p>
-              <p className="text-[12px] text-[#1D1D1F] leading-relaxed">
-                {otpModalOpen === "pickup"
-                  ? "Enter the 6-digit OTP provided by the source hospital officer to confirm pickup and transfer custody to the courier."
-                  : "Enter the 6-digit OTP provided by the courier driver to confirm delivery and settle inventory in the eRaktKosh ledger."}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">6-Digit OTP Code</label>
-              <input
-                type="text"
-                maxLength={6}
-                placeholder="Enter 6-digit OTP"
-                value={otpInput}
-                onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                className="w-full border border-[#E5E5E7] rounded-[8px] p-3 text-[20px] font-mono tracking-widest text-center font-bold text-[#0071E3]"
-                autoFocus
-              />
-              {otpInput.length > 0 && otpInput.length < 6 && (
-                <p className="text-[11px] text-[#C41230] mt-1">Please enter all 6 digits</p>
-              )}
-            </div>
-
-            <button
-              onClick={handleVerifyOtp}
-              disabled={otpInput.length !== 6}
-              className={`w-full py-3 text-white text-[14px] font-semibold rounded-full transition-colors cursor-pointer shadow-sm ${
-                otpInput.length === 6
-                  ? "bg-[#1A8A2C] hover:bg-[#157424]"
-                  : "bg-[#AEAEB2] cursor-not-allowed"
-              }`}
-            >
-              {otpInput.length === 6 ? "Verify OTP & Update Custody →" : "Enter 6-digit OTP to continue"}
-            </button>
-          </div>
-        </Drawer>
-      )}
-
-      {/* Transfer review drawer */}
-      {selectedOpp && (
-        <Drawer
-          title="Review & Dispatch Transfer Order"
-          subtitle={`${selectedOpp.from} → ${selectedOpp.to}`}
-          onClose={() => setReviewId(null)}
-        >
-          <div className="space-y-5">
-            <div>
-              <SectionLabel>Mapbox Routing & Shiprocket Dispatch</SectionLabel>
-              <p className="text-[14px] text-[#1D1D1F] mb-2">{selectedOpp.reason}</p>
-              <p className="text-[13px] text-[#6E6E73]">Available Surplus: {selectedOpp.units} units</p>
-              <p className="text-[13px] text-[#6E6E73]">Active Provider: <strong className="text-[#0071E3]">{selectedProvider.toUpperCase()}</strong></p>
-            </div>
-            <button
-              onClick={() => offerMutation.mutate({ oppId: selectedOpp.id, quantity: selectedOpp.units })}
-              className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer shadow-sm"
-            >
-              Accept Transfer & Reserve Units
-            </button>
-          </div>
-        </Drawer>
-      )}
     </div>
+  );
+}
+
+function CandidateRow({
+  candidate,
+  isPull,
+  selected,
+  onSelect,
+}: {
+  candidate: Counterparty;
+  isPull: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="w-full text-left rounded-[11px] px-4 py-3 cursor-pointer transition-all"
+      style={{
+        border: selected ? "2px solid #0071E3" : "1px solid #E5E5E7",
+        background: selected ? "#F5F9FF" : "white",
+      }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[14px] font-medium text-[#1D1D1F] truncate">{candidate.short_name}</p>
+          <p className="text-[12px] text-[#6E6E73] mt-0.5">
+            {candidate.straight_line_km !== null ? `${candidate.straight_line_km.toFixed(1)} km away` : "Distance unknown"}
+            {" · "}{candidate.tier}
+          </p>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <p className="text-[15px] font-semibold text-[#1D1D1F] leading-tight">{candidate.available_units}</p>
+          <p className="text-[11px] text-[#AEAEB2]">usable {candidate.component_type}</p>
+          {isPull && candidate.expiring_24h > 0 && (
+            <p className="text-[11px] mt-0.5" style={{ color: "#C77700" }}>
+              {candidate.expiring_24h} expire soon
+            </p>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+// ── Small pieces ─────────────────────────────────────────────────────────────
+
+function Section({
+  title,
+  count,
+  empty,
+  show,
+  children,
+}: {
+  title: string;
+  count: number;
+  empty: string;
+  show: boolean;
+  children: React.ReactNode;
+}) {
+  if (!show) return null;
+  return (
+    <section className="mb-9">
+      <div className="flex items-baseline gap-2.5 mb-3">
+        <h2 className="text-[11px] font-semibold text-[#AEAEB2] uppercase tracking-widest">{title}</h2>
+        {count > 0 && <span className="text-[11px] text-[#AEAEB2]">{count}</span>}
+      </div>
+      {count === 0 ? <p className="text-[13px] text-[#AEAEB2]">{empty}</p> : children}
+    </section>
+  );
+}
+
+function Fact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <p className="text-[10px] font-semibold text-[#AEAEB2] uppercase tracking-wider">{label}</p>
+      <p className={`text-[13px] text-[#1D1D1F] mt-0.5 ${mono ? "font-mono" : "font-medium"}`}>{value}</p>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <p className="text-[11px] font-semibold text-[#1D1D1F] uppercase tracking-wider mb-2">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+// ── Predicates ───────────────────────────────────────────────────────────────
+
+function isFinished(transfer: Transfer): boolean {
+  return ["TRANSFER_COMPLETED", "DECLINED", "CANCELLED", "FAILED"].includes(transfer.status);
+}
+
+/** True when the ball is in this console's court. */
+function needsMyAction(transfer: Transfer): boolean {
+  if (isFinished(transfer)) return false;
+  const isSender = transfer.viewer_role === "SENDER";
+
+  if (isSender) {
+    return ["REQUESTED", "UNITS_RESERVED", "SHIPMENT_CREATED", "AWB_ASSIGNED", "PICKUP_OTP_REQUIRED"]
+      .includes(transfer.status);
+  }
+  return (
+    ["IN_TRANSIT", "ARRIVED", "DELIVERY_OTP_REQUIRED"].includes(transfer.status) &&
+    transfer.delivery_otp.issued
   );
 }

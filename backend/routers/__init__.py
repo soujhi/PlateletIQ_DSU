@@ -8,6 +8,8 @@ from routers.network import router as network_router
 from routers.analytics import router as analytics_router
 from routers.camp import router as camp_router
 from routers.transport import transport_router
+from routers.webhooks import webhooks_router
+from routers.facilities import router as facilities_router
 
 __all__ = [
     "auth_router",
@@ -20,5 +22,7 @@ __all__ = [
     "analytics_router",
     "camp_router",
     "transport_router",
+    "webhooks_router",
+    "facilities_router",
 ]
 

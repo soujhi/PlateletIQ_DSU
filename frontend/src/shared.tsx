@@ -1,14 +1,17 @@
-import { ReactNode } from "react";
+import { CSSProperties, ReactNode } from "react";
 import { motion } from "framer-motion";
 
 // ─── Card ─────────────────────────────────────────────────────────────────────
-export function Card({ children, className = "", index = 0 }: { children: ReactNode; className?: string; index?: number }) {
+export function Card({ children, className = "", index = 0, style }: {
+  children: ReactNode; className?: string; index?: number; style?: CSSProperties;
+}) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: index * 0.08, ease: [0.22, 1, 0.36, 1] }}
       className={`bg-white rounded-[14px] border border-[#E5E5E7] shadow-[0_1px_3px_rgba(0,0,0,0.05)] ${className}`}
+      style={style}
     >
       {children}
     </motion.div>

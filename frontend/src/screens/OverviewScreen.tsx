@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Card, SectionLabel, ProvenanceBadge, DemoModeBanner, Drawer, transferOpportunities } from "../shared";
-import { inventoryApi, forecastApi, recommendationApi } from "../api/endpoints";
+import { Card, SectionLabel, ProvenanceBadge, DemoModeBanner, Drawer } from "../shared";
+import { facilityApi, inventoryApi, forecastApi, recommendationApi, transferApi } from "../api/endpoints";
+import type { Counterparty } from "../api/types";
+import { useAuth } from "../contexts/AuthContext";
 import { AnimatedNumber } from "../components/AnimatedNumber";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 import { ErrorState } from "../components/ErrorState";
@@ -11,9 +13,13 @@ import {
 } from "recharts";
 
 export default function OverviewScreen() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
   const [whyOpen, setWhyOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
-  const [transferSuccess, setTransferSuccess] = useState(false);
+  const [transferSuccess, setTransferSuccess] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const [requestUnits, setRequestUnits] = useState(12);
 
   const { data: summary, isLoading: loadingSummary, error: errorSummary, refetch: refetchSummary } = useQuery({
     queryKey: ["inventorySummary"],
@@ -28,6 +34,34 @@ export default function OverviewScreen() {
   const { data: recData, isLoading: loadingRec, error: errorRec, refetch: refetchRec } = useQuery({
     queryKey: ["recommendationCurrent"],
     queryFn: recommendationApi.getCurrent,
+  });
+
+  // Who in the network could actually cover a shortfall right now.
+  const { data: candidates } = useQuery({
+    queryKey: ["counterparties", "SDP", user?.bank_id],
+    queryFn: () => facilityApi.counterparties("SDP"),
+    enabled: Boolean(user?.bank_id),
+  });
+
+  const openRequest = useMutation({
+    mutationFn: ({ facilityId, units }: { facilityId: string; units: number }) =>
+      transferApi.create({
+        counterparty_bank_id: facilityId,
+        direction: "SHORTAGE_PULL",
+        units,
+        component_type: "SDP",
+        priority: "URGENT",
+        reason: "Raised from the overview against a projected SDP shortfall.",
+      }),
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ["transfers"] });
+      setTransferError(null);
+      setTransferSuccess(
+        `Request ${created.id} sent to ${created.source.short_name}. Track it under Transfers.`,
+      );
+    },
+    onError: (err: unknown) =>
+      setTransferError(err instanceof Error ? err.message : "Could not open the transfer."),
   });
 
   if (loadingSummary || loadingForecast || loadingRec) {
@@ -71,13 +105,15 @@ export default function OverviewScreen() {
     forecast: f.q50,
   }));
 
-  const transfer = transferOpportunities[0]; // first SDP transfer
+  // The nearest facility holding enough usable SDP to be worth asking.
+  const transfer: Counterparty | null =
+    (candidates ?? [])
+      .filter((candidate) => candidate.available_units >= 12)
+      .sort((a, b) => (a.straight_line_km ?? Infinity) - (b.straight_line_km ?? Infinity))[0] ?? null;
 
   return (
     <div className="p-8 max-w-[980px]">
-      <DemoModeBanner>
-        ⚠ Demo mode — forecast from German hospital data (2008–2018)
-      </DemoModeBanner>
+      <DemoModeBanner />
 
       {/* Header */}
       <div className="mt-6 mb-8">
@@ -85,7 +121,7 @@ export default function OverviewScreen() {
           OVERVIEW
         </p>
         <h1 className="text-[26px] font-bold text-[#1D1D1F] tracking-tight leading-none mb-1">
-          Govt. General Hospital Chennai
+          {user?.bank_name}
         </h1>
         <p className="text-[13px] text-[#6E6E73]">
           Blood bank operations dashboard · Officer view
@@ -190,36 +226,40 @@ export default function OverviewScreen() {
         </Card>
       </motion.div>
 
-      {/* Transfer card */}
-      <Card className="p-5 flex items-center justify-between mb-6" index={5}>
-        <div className="flex items-center gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-0.5">
-              <div className="w-2 h-2 rounded-full bg-[#1A8A2C]"></div>
-              <p className="text-[13px] font-bold text-[#1D1D1F]">{transfer.source_city}</p>
+      {/* Nearest facility that could cover a shortfall */}
+      {transfer && (
+        <Card className="p-5 flex items-center justify-between mb-6" index={5}>
+          <div className="flex items-center gap-4">
+            <div>
+              <div className="flex items-center gap-2 mb-0.5">
+                <div className="w-2 h-2 rounded-full bg-[#1A8A2C]"></div>
+                <p className="text-[13px] font-bold text-[#1D1D1F]">{transfer.short_name}</p>
+              </div>
+              <p className="text-[10px] text-[#6E6E73] uppercase tracking-wider font-semibold">
+                {transfer.straight_line_km !== null ? `${transfer.straight_line_km.toFixed(1)} km away` : "Distance unknown"}
+              </p>
             </div>
-            <p className="text-[10px] text-[#6E6E73] uppercase tracking-wider font-semibold">● 12h freshness · CURRENT</p>
+            <div className="text-[#AEAEB2] text-[18px] font-light">→</div>
+            <div>
+              <p className="text-[13px] font-bold text-[#1D1D1F]">{user?.bank_name}</p>
+              <p className="text-[10px] text-[#6E6E73] uppercase tracking-wider font-semibold">your facility</p>
+            </div>
           </div>
-          <div className="text-[#AEAEB2] text-[18px] font-light">→</div>
-          <div>
-            <p className="text-[13px] font-bold text-[#1D1D1F]">GGH Chennai</p>
-            <p className="text-[10px] text-[#6E6E73] uppercase tracking-wider font-semibold">{transfer.product_type} transfer</p>
+          <div className="flex items-center gap-4">
+            <div className="text-right">
+              <p className="text-[20px] font-bold text-[#0071E3] leading-none">{transfer.available_units}</p>
+              <p className="text-[10px] text-[#6E6E73] font-medium">usable SDP</p>
+            </div>
+            <button
+              onClick={() => setTransferOpen(true)}
+              className="text-[12px] font-semibold text-[#0071E3] bg-[#E8F2FD] px-3.5 py-1.5 rounded-full hover:bg-[#D5E8F9] transition-colors cursor-pointer"
+            >
+              Request units →
+            </button>
+            <ProvenanceBadge type="live" />
           </div>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <p className="text-[20px] font-bold text-[#0071E3] leading-none">{transfer.quantity}</p>
-            <p className="text-[10px] text-[#6E6E73] font-medium">SDP units</p>
-          </div>
-          <button
-            onClick={() => setTransferOpen(true)}
-            className="text-[12px] font-semibold text-[#0071E3] bg-[#E8F2FD] px-3.5 py-1.5 rounded-full hover:bg-[#D5E8F9] transition-colors cursor-pointer"
-          >
-            Review transfer →
-          </button>
-          <ProvenanceBadge type="external" />
-        </div>
-      </Card>
+        </Card>
+      )}
 
       {/* Demand chart card */}
       <Card className="p-6" index={6}>
@@ -238,7 +278,7 @@ export default function OverviewScreen() {
               cursor={{ fill: "#F5F5F7" }}
             />
             <Bar dataKey="forecast" isAnimationActive={false}>
-              {chartData.map((entry, index) => (
+              {chartData.map((entry: any, index: number) => (
                 <Cell 
                   key={`cell-${index}`} 
                   fill={entry.actual !== null ? "#0071E3" : "transparent"} 
@@ -283,50 +323,72 @@ export default function OverviewScreen() {
         </Drawer>
       )}
 
-      {/* Transfer Drawer */}
-      {transferOpen && (
+      {/* Request drawer */}
+      {transferOpen && transfer && (
         <Drawer
-          title="Review Transfer Opportunity"
-          subtitle={`${transfer.source_city} → GGH Chennai`}
-          onClose={() => { setTransferOpen(false); setTransferSuccess(false); }}
+          title="Request units"
+          subtitle={`${transfer.short_name} → ${user?.bank_name}`}
+          onClose={() => { setTransferOpen(false); setTransferSuccess(null); setTransferError(null); }}
         >
           <div className="space-y-5">
             {transferSuccess ? (
-              <div className="p-4 bg-[#E8F4EB] border border-[#A5D6A7] text-[#1A8A2C] rounded-[10px] text-[13px] font-medium">
-                ✓ Transfer offer submitted to {transfer.source_city}! Awaiting hub dispatch.
+              <div className="p-4 bg-[#E8F4EB] border border-[#A5D6A7] text-[#1A8A2C] rounded-[10px] text-[13px] font-medium leading-relaxed">
+                {transferSuccess}
               </div>
             ) : (
               <>
                 <div className="bg-[#E8F2FD] rounded-[12px] p-5 border border-[#B5D4F4]">
-                  <p className="text-[14px] font-bold text-[#0071E3] mb-1">
-                    {transfer.source_city} → GGH Chennai
-                  </p>
-                  <p className="text-[13px] text-[#1D1D1F]">
-                    {transfer.quantity} SDP units available with 12h freshness score (CURRENT).
-                  </p>
+                  <p className="text-[14px] font-bold text-[#0071E3] mb-1">{transfer.name}</p>
+                  <p className="text-[13px] text-[#1D1D1F] leading-relaxed">{transfer.address}</p>
                 </div>
+
                 <div>
-                  <SectionLabel>Transfer Specifications</SectionLabel>
+                  <SectionLabel>What they currently hold</SectionLabel>
                   <div className="space-y-2.5">
                     <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                      <span className="text-[13px] text-[#6E6E73]">Quantity</span>
-                      <span className="text-[14px] font-bold text-[#0071E3]">{transfer.quantity} SDP units</span>
+                      <span className="text-[13px] text-[#6E6E73]">Usable SDP units</span>
+                      <span className="text-[14px] font-bold text-[#0071E3]">{transfer.available_units}</span>
                     </div>
                     <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                      <span className="text-[13px] text-[#6E6E73]">Source Entry Freshness</span>
-                      <span className="text-[13px] font-bold text-[#1A8A2C]">● CURRENT (12h)</span>
+                      <span className="text-[13px] text-[#6E6E73]">Expiring within 24h</span>
+                      <span className="text-[13px] font-bold text-[#1D1D1F]">{transfer.expiring_24h}</span>
                     </div>
                     <div className="flex justify-between py-2 border-b border-[#F5F5F7]">
-                      <span className="text-[13px] text-[#6E6E73]">Target Facility</span>
-                      <span className="text-[13px] font-bold text-[#1D1D1F]">Govt. General Hospital Chennai</span>
+                      <span className="text-[13px] text-[#6E6E73]">eRaktKosh code</span>
+                      <span className="text-[13px] font-mono text-[#1D1D1F]">{transfer.code}</span>
                     </div>
                   </div>
                 </div>
+
+                <div>
+                  <SectionLabel>Units to request</SectionLabel>
+                  <input
+                    type="number"
+                    min={1}
+                    max={Math.max(1, transfer.available_units)}
+                    value={requestUnits}
+                    onChange={(event) => setRequestUnits(Math.max(1, Number(event.target.value) || 1))}
+                    className="w-32 bg-[#F5F5F7] border border-[#E5E5E7] text-[#1D1D1F] text-[14px] rounded-[10px] px-3 py-2.5 focus:outline-none focus:border-[#0071E3]"
+                  />
+                </div>
+
+                {transferError && (
+                  <div className="p-4 bg-[#FDECEC] border border-[#F5C6C6] text-[#B3261E] rounded-[10px] text-[13px] leading-relaxed">
+                    {transferError}
+                  </div>
+                )}
+
+                <p className="text-[12px] text-[#6E6E73] leading-relaxed">
+                  This sends a request. {transfer.short_name} decides whether to release the units
+                  and controls the handover.
+                </p>
+
                 <button
-                  onClick={() => setTransferSuccess(true)}
-                  className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
+                  onClick={() => openRequest.mutate({ facilityId: transfer.id, units: requestUnits })}
+                  disabled={openRequest.isPending}
+                  className="w-full py-3 bg-[#0071E3] text-white text-[14px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer disabled:opacity-50"
                 >
-                  Confirm Transfer Request
+                  {openRequest.isPending ? "Sending…" : `Request ${requestUnits} SDP units`}
                 </button>
               </>
             )}

@@ -2,7 +2,7 @@ from models.bank import Bank, BankMembership
 from models.inventory import InventoryUnit, InventoryEvent
 from models.forecast import ForecastRun, Forecast, Recommendation
 from models.requisition import Requisition
-from models.transfer import TransferOpportunity, TransferOffer
+from models.transfer import Transfer, TransferEvent, TransferOpportunity, TransferOffer
 from models.external import ExternalSnapshot, ExternalInventoryRecord
 from models.audit import AuditLog
 from models.config import SystemConfig
@@ -18,6 +18,8 @@ __all__ = [
     "Forecast",
     "Recommendation",
     "Requisition",
+    "Transfer",
+    "TransferEvent",
     "TransferOpportunity",
     "TransferOffer",
     "ExternalSnapshot",

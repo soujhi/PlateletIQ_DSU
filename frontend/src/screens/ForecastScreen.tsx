@@ -237,7 +237,7 @@ export default function ForecastScreen() {
                 <ProvenanceBadge type="model" />
               </div>
               <p className="text-[13px] text-[#1D1D1F] leading-relaxed">
-                Trained on 4,018 days of daily platelet issuing records (Aachen hospital dataset 2008–2018). Target variable transformed via square root ($\sqrt{y}$) to stabilize variance before L1 regularized parameter estimation.
+                Trained on 4,018 days of daily platelet issuing records (Aachen hospital dataset 2008–2018). Target variable transformed via square root to stabilise variance before L1 regularized parameter estimation.
               </p>
             </div>
 

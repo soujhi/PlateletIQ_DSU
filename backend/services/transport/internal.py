@@ -35,6 +35,7 @@ class InternalFleetProvider:
         drop_name: str,
         drop_mobile: str,
         units_count: int = 1,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         order_id = f"INT-{uuid.uuid4().hex[:8].upper()}"
         instructions = [
@@ -56,8 +57,9 @@ class InternalFleetProvider:
         return {
             "order_id": order_id,
             "status": "IN_TRANSIT",
-            "driver": {"name": "Karthik", "mobile": "+91 98400 54321", "vehicle": "TN-01-RUNNER-04"},
-            "location": {"lat": 13.0800, "lng": 80.2650},
+            # An internal runner has no telemetry feed; the tracker projects
+            # the position along the route and labels it as a projection.
+            "location": None,
             "provider": "internal_fleet",
         }
 

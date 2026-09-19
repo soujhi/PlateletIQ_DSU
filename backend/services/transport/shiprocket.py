@@ -10,6 +10,36 @@ SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL", "")
 SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD", "")
 SHIPROCKET_BASE_URL = "https://apiv2.shiprocket.in/v1/external"
 TRANSPORT_MODE = os.getenv("TRANSPORT_MODE", "mock").lower()
+SHIPROCKET_PICKUP_LOCATION = os.getenv("SHIPROCKET_PICKUP_LOCATION", "Primary")
+SHIPROCKET_BILLING_EMAIL = os.getenv("SHIPROCKET_BILLING_EMAIL", "")
+
+
+def _extract_location(track_data: Dict[str, Any], activities: list) -> Optional[Dict[str, float]]:
+    """
+    Pull a coordinate pair out of a Shiprocket tracking payload.
+
+    Shiprocket's schema varies by courier: some return a top-level
+    ``current_location`` object, others only scan activities carrying
+    coordinates. Return None when neither has usable numbers, so the caller
+    falls back to its route projection rather than plotting a bogus point.
+    """
+    candidates = []
+    current = track_data.get("current_location")
+    if isinstance(current, dict):
+        candidates.append(current)
+    for activity in reversed(activities):
+        if isinstance(activity, dict):
+            candidates.append(activity)
+
+    for candidate in candidates:
+        lat = candidate.get("lat") or candidate.get("latitude")
+        lng = candidate.get("lng") or candidate.get("long") or candidate.get("longitude")
+        try:
+            if lat is not None and lng is not None:
+                return {"lat": float(lat), "lng": float(lng)}
+        except (TypeError, ValueError):
+            continue
+    return None
 
 # Module-level thread-safe JWT token cache across requests
 _TOKEN: Optional[str] = os.getenv("SHIPROCKET_TOKEN")
@@ -70,7 +100,7 @@ class ShiprocketTransportProvider:
 
     def get_serviceability(
         self,
-        pickup_pincode: str = "600003",
+        pickup_pincode: str = "",
         delivery_pincode: str = "600006",
         weight: float = 0.5,
         cod: int = 0,
@@ -152,9 +182,10 @@ class ShiprocketTransportProvider:
         drop_name: str,
         drop_mobile: str,
         units_count: int = 1,
-        pickup_pincode: str = "600003",
-        drop_pincode: str = "600006",
-        pickup_location_name: str = "GGH_Chennai_Hub",
+        pickup_pincode: str = "",
+        drop_pincode: str = "",
+        pickup_location_name: str = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Create adhoc shipment order on Shiprocket with medical cold-chain instructions."""
         cold_chain_instructions = [
@@ -171,13 +202,13 @@ class ShiprocketTransportProvider:
                 "order_id": sr_order_id,
                 "shipment_id": f"SHIP-{uuid.uuid4().hex[:8].upper()}",
                 "awb_code": sr_awb,
-                "status": "DRIVER_ASSIGNED",
-                "courier_name": "Delhivery Express (Shiprocket Partner)",
-                "driver_name": "Ramesh V. (Shiprocket Courier)",
-                "driver_mobile": "+91 97900 12345",
-                "vehicle_number": "TN-01-SR-8888",
+                "status": "SHIPMENT_CREATED",
+                "courier_name": "Simulated courier (no Shiprocket credentials configured)",
+                "driver_name": None,
+                "driver_mobile": None,
+                "vehicle_number": None,
                 "instructions": cold_chain_instructions,
-                "provider": "shiprocket_mock",
+                "provider": "shiprocket_simulated",
             }
 
         token = self._get_auth_token()
@@ -187,16 +218,16 @@ class ShiprocketTransportProvider:
             payload = {
                 "order_id": f"SR-PLT-{transfer_id[:8]}",
                 "order_date": order_date,
-                "pickup_location": pickup_location_name,
+                "pickup_location": pickup_location_name or SHIPROCKET_PICKUP_LOCATION,
                 "billing_customer_name": pickup_name[:30],
                 "billing_last_name": "BloodBank",
                 "billing_address": pickup_address[:50],
                 "billing_city": "Chennai",
-                "billing_pincode": pickup_pincode,
+                "billing_pincode": pickup_pincode or "",
                 "billing_state": "Tamil Nadu",
                 "billing_country": "India",
-                "billing_email": "ggh.bloodbank@tn.gov.in",
-                "billing_phone": pickup_mobile.replace("+91", "").strip() or "9840012345",
+                "billing_email": kwargs.get("pickup_email") or SHIPROCKET_BILLING_EMAIL,
+                "billing_phone": (pickup_mobile or "").replace("+91", "").strip(),
                 "shipping_is_billing": True,
                 "order_items": [
                     {
@@ -288,13 +319,16 @@ class ShiprocketTransportProvider:
     def track_order(self, order_id: str) -> Dict[str, Any]:
         """Track order status by order ID or shipment ID."""
         if self.is_mock:
+            # No GPS fix is returned in simulation. Inventing one would be
+            # indistinguishable from real telemetry downstream; leaving it out
+            # makes the tracker fall back to its route projection and label it.
             return {
                 "order_id": order_id,
                 "status": "IN_TRANSIT",
-                "courier": "Delhivery Express (Shiprocket Partner)",
-                "driver": {"name": "Ramesh V.", "mobile": "+91 97900 12345", "vehicle": "TN-01-SR-8888"},
-                "location": {"lat": 13.0720, "lng": 80.2610},
-                "provider": "shiprocket_mock",
+                "courier": "Simulated intra-city medical courier",
+                "location": None,
+                "provider": "shiprocket_simulated",
+                "tracking_details": [],
             }
 
         token = self._get_auth_token()
@@ -304,13 +338,14 @@ class ShiprocketTransportProvider:
             if res.status_code == 200:
                 data = res.json()
                 track_data = data.get("tracking_data", {})
+                activities = track_data.get("shipment_track_activities", []) or []
                 return {
                     "order_id": order_id,
                     "status": track_data.get("track_status", "IN_TRANSIT"),
                     "courier": track_data.get("courier_name"),
-                    "location": track_data.get("current_location"),
+                    "location": _extract_location(track_data, activities),
                     "provider": "shiprocket_api",
-                    "tracking_details": track_data.get("shipment_track_activities", []),
+                    "tracking_details": activities,
                 }
             else:
                 raise TransportError(f"Shiprocket tracking API failed with status {res.status_code}: {res.text}", provider="shiprocket")

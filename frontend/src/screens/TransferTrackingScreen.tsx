@@ -1,266 +1,321 @@
-import { useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, SectionLabel, ProvenanceBadge, Drawer } from "../shared";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { transferApi } from "../api/endpoints";
-import { LoadingSkeleton } from "../components/LoadingSkeleton";
-import { ErrorState } from "../components/ErrorState";
+import type { Transfer } from "../api/types";
+import RouteMap, { describeSource } from "../components/RouteMap";
 
-export default function TransferTrackingScreen() {
-  const { transferId } = useParams<{ transferId: string }>();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
+const TRACK_POLL_MS = 3000;
 
-  const [otpModalOpen, setOtpModalOpen] = useState<"pickup" | "delivery" | null>(null);
-  const [otpInput, setOtpInput] = useState<string>("");
-  const [otpMsg, setOtpMsg] = useState<string | null>(null);
+/**
+ * Flipkart-style shipment tracking for one transfer: a live map, the stage
+ * strip, and the scan-by-scan timeline.
+ *
+ * Both facilities see the same page from the same endpoint, so neither side
+ * has to ask the other where the box is.
+ */
+export default function TransferTrackingScreen({
+  transferId,
+  onBack,
+}: {
+  transferId: string | null;
+  onBack?: () => void;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(transferId);
 
-  const { data: transferData, isLoading, error, refetch } = useQuery({
-    queryKey: ["transferDetail", transferId],
-    queryFn: async () => {
-      // Fetch active transfers list and find current transferId or default
-      const res = await transferApi.getOpportunities();
-      return (
-        res?.find((t: any) => t.id === transferId) || {
-          id: transferId || "TRF-DEMO-001",
-          source_name: "Govt. General Hospital Chennai (TN-GGH-001)",
-          destination_name: "Apollo Hospitals Greams Road (TN-APO-014)",
-          units: 12,
-          component: "platelets",
-          priority: "HIGH",
-          status: "IN_TRANSIT",
-          awb_code: "AWB-SR-998877",
-          courier_name: "Delhivery Express (Shiprocket)",
-          eta_minutes: 18,
-          distance_km: 8.4,
-          driver: { name: "Ramesh V. (Shiprocket Courier)", mobile: "+91 97900 12345", vehicle: "TN-01-SR-8888" },
-          instructions: [
-            "Medical cargo — perishable platelets (Category: MEDICAL_PERISHABLE).",
-            "Keep upright at 20–24 °C room temperature.",
-            "DO NOT REFRIGERATE or pack with ice.",
-            "Deliver within 90 minutes.",
-          ],
-        }
-      );
-    },
+  useEffect(() => { setSelectedId(transferId); }, [transferId]);
+
+  // Without a specific transfer, offer whatever is currently in flight.
+  const { data: active } = useQuery({
+    queryKey: ["transfers", "active"],
+    queryFn: () => transferApi.list("active"),
+    enabled: !selectedId,
+    refetchInterval: TRACK_POLL_MS,
   });
 
-  const verifyOtpMutation = useMutation({
-    mutationFn: async ({ purpose, otp }: { purpose: "pickup" | "delivery"; otp: string }) => {
-      if (purpose === "pickup") {
-        return { status: "IN_TRANSIT", message: "Pickup OTP Verified! Custody transferred to courier." };
-      } else {
-        return { status: "TRANSFER_COMPLETED", message: "Delivery OTP Verified! Receipt confirmed & inventory settled." };
-      }
-    },
-    onSuccess: (res) => {
-      setOtpMsg(res.message);
-      setOtpModalOpen(null);
-      setOtpInput("");
-      queryClient.invalidateQueries({ queryKey: ["transferDetail"] });
-    },
+  const { data: tracked, error, isLoading } = useQuery({
+    queryKey: ["track", selectedId],
+    queryFn: () => transferApi.track(selectedId!),
+    enabled: Boolean(selectedId),
+    refetchInterval: TRACK_POLL_MS,
   });
+
+  if (!selectedId) {
+    return <TransferPicker transfers={active ?? []} onPick={setSelectedId} />;
+  }
 
   if (isLoading) {
+    return <div className="px-8 py-7"><p className="text-[14px] text-[#6E6E73]">Loading shipment…</p></div>;
+  }
+
+  if (error || !tracked) {
     return (
-      <div className="p-8 max-w-4xl space-y-6">
-        <LoadingSkeleton height="180px" />
-        <LoadingSkeleton height="320px" />
+      <div className="px-8 py-7">
+        <div className="rounded-[12px] px-5 py-4 max-w-[560px]" style={{ background: "#FDECEC", border: "1px solid #F5C6C6" }}>
+          <p className="text-[14px] font-medium" style={{ color: "#B3261E" }}>Could not load this shipment.</p>
+          <p className="text-[13px] mt-1 leading-relaxed" style={{ color: "#B3261E" }}>
+            {error instanceof Error ? error.message : "Unknown error."}
+          </p>
+        </div>
+        <button onClick={() => setSelectedId(null)} className="mt-4 text-[13px] text-[#0071E3] cursor-pointer">
+          Pick another shipment
+        </button>
       </div>
     );
   }
 
-  if (error || !transferData) {
-    return (
-      <div className="p-8 max-w-4xl">
-        <ErrorState message="Could not load shipment tracking details." onRetry={refetch} />
-      </div>
-    );
-  }
-
-  const trf = transferData;
-  const isDelivered = trf.status === "TRANSFER_COMPLETED" || trf.status === "DELIVERED";
+  const isSender = tracked.viewer_role === "SENDER";
+  const live = tracked.location.location_source === "courier_live";
 
   return (
-    <div className="p-8 max-w-4xl">
-      {/* Flipkart-Style Header Navigation */}
-      <div className="mb-6 flex items-center justify-between">
-        <button
-          onClick={() => navigate("/transfers")}
-          className="text-[13px] font-medium text-[#0071E3] hover:underline flex items-center gap-1 cursor-pointer"
-        >
-          ← Back to Transfers
-        </button>
-        <div className="flex items-center gap-2">
-          <ProvenanceBadge type="external" />
-          <span className="px-3 py-1 bg-[#E8F1FC] text-[#0071E3] text-[12px] font-bold rounded-full border border-[#C8DCF5]">
-            AWB: {trf.awb_code || "AWB-SR-998877"}
-          </span>
+    <div className="px-8 py-7 max-w-[1180px]">
+      <button
+        onClick={() => (onBack ? onBack() : setSelectedId(null))}
+        className="text-[13px] text-[#6E6E73] hover:text-[#1D1D1F] mb-4 cursor-pointer transition-colors"
+      >
+        ← Back
+      </button>
+
+      <header className="flex flex-wrap items-start justify-between gap-4 mb-6">
+        <div>
+          <p className="text-[12px] font-mono text-[#AEAEB2]">{tracked.id}</p>
+          <h1 className="text-[24px] font-semibold text-[#1D1D1F] tracking-tight mt-1 leading-snug">
+            {tracked.units} {tracked.component_type} unit{tracked.units === 1 ? "" : "s"} ·{" "}
+            {tracked.source.short_name} → {tracked.destination.short_name}
+          </h1>
+          <p className="text-[13px] text-[#6E6E73] mt-1">
+            {isSender ? "You are the sending facility." : "You are the receiving facility."}
+          </p>
+        </div>
+
+        <div className="text-right">
+          <p className="text-[11px] font-semibold text-[#AEAEB2] uppercase tracking-wider">
+            {tracked.status === "IN_TRANSIT" ? "Arriving in" : "Status"}
+          </p>
+          <p className="text-[22px] font-semibold text-[#1D1D1F] leading-tight mt-0.5">
+            {tracked.status === "IN_TRANSIT" && tracked.eta_remaining_minutes !== null
+              ? `${tracked.eta_remaining_minutes} min`
+              : tracked.status.replace(/_/g, " ").toLowerCase()}
+          </p>
+        </div>
+      </header>
+
+      <StageStrip transfer={tracked} />
+
+      <div className="grid lg:grid-cols-[1.45fr_1fr] gap-5 mt-6">
+        {/* Map */}
+        <div>
+          <RouteMap
+            source={tracked.source}
+            destination={tracked.destination}
+            routeGeometry={tracked.route_geometry}
+            location={tracked.location}
+            height={440}
+          />
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-3">
+            <span className="flex items-center gap-2">
+              <span
+                className="w-2 h-2 rounded-full"
+                style={{ background: live ? "#0071E3" : "#8E8E93" }}
+              />
+              <span className="text-[12px] text-[#6E6E73]">
+                {describeSource(tracked.location.location_source)}
+              </span>
+            </span>
+
+            {tracked.location.fix_age_seconds !== null && tracked.location.fix_age_seconds > 0 && (
+              <span className="text-[12px] text-[#AEAEB2]">
+                updated {tracked.location.fix_age_seconds}s ago
+              </span>
+            )}
+
+            <span className="text-[12px] text-[#AEAEB2]">
+              Route via {routeProviderLabel(tracked.route_provider)}
+            </span>
+          </div>
+        </div>
+
+        {/* Shipment details */}
+        <div className="space-y-4">
+          <Panel title="Shipment">
+            <Row label="Courier" value={tracked.courier_name ?? "Not booked"} />
+            <Row label="Airway bill" value={tracked.awb_code ?? "—"} mono />
+            <Row label="Provider" value={tracked.transport_provider_label ?? tracked.transport_provider ?? "—"} />
+            {tracked.rider?.name && <Row label="Rider" value={tracked.rider.name} />}
+            {tracked.rider?.vehicle && <Row label="Vehicle" value={tracked.rider.vehicle} mono />}
+            <Row label="Distance" value={tracked.distance_km ? `${tracked.distance_km.toFixed(2)} km` : "—"} />
+            <Row label="Routed ETA" value={tracked.eta_minutes ? `${tracked.eta_minutes} min` : "—"} />
+          </Panel>
+
+          <Panel title="Handling">
+            <ul className="space-y-2">
+              {tracked.instructions.map((line) => (
+                <li key={line} className="flex items-start gap-2.5">
+                  <span className="mt-[7px] w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: "#C41230" }} />
+                  <span className="text-[13px] text-[#1D1D1F] leading-relaxed">{line}</span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
         </div>
       </div>
 
-      {otpMsg && (
-        <div className="mb-5 p-4 bg-[#E8F4EB] border border-[#A5D6A7] rounded-[12px] flex items-center justify-between text-[#1A8A2C] text-[13px] font-medium">
-          <span>✓ {otpMsg}</span>
-          <button onClick={() => setOtpMsg(null)} className="text-[#1A8A2C] text-[16px] cursor-pointer">✕</button>
-        </div>
-      )}
+      {/* Timeline */}
+      <section className="mt-8">
+        <h2 className="text-[11px] font-semibold text-[#AEAEB2] uppercase tracking-widest mb-4">
+          Shipment history
+        </h2>
+        <ol className="relative">
+          {tracked.timeline.map((entry, index) => {
+            const last = index === tracked.timeline.length - 1;
+            return (
+              <li key={`${entry.occurred_at}-${index}`} className="flex gap-4 pb-5 relative">
+                {!last && (
+                  <span className="absolute left-[5px] top-4 bottom-0 w-px" style={{ background: "#E5E5E7" }} />
+                )}
+                <span
+                  className="w-2.5 h-2.5 rounded-full mt-1.5 flex-shrink-0 relative z-10"
+                  style={{ background: last ? "#0071E3" : "#C7C7CC" }}
+                />
+                <div className="min-w-0">
+                  <p className="text-[14px] font-medium text-[#1D1D1F] leading-snug">{entry.title}</p>
+                  {entry.description && (
+                    <p className="text-[13px] text-[#6E6E73] mt-1 leading-relaxed">{entry.description}</p>
+                  )}
+                  <p className="text-[11px] text-[#AEAEB2] mt-1.5">
+                    {formatTimestamp(entry.occurred_at)}
+                    {entry.source !== "system" && ` · ${entry.source}`}
+                  </p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+    </div>
+  );
+}
 
-      {/* Shipment Status Hero Banner */}
-      <Card className="p-6 mb-6 border-l-4 border-l-[#0071E3] bg-gradient-to-br from-white to-[#F9FAFB]">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <p className="text-[10px] font-bold text-[#AEAEB2] uppercase tracking-widest">Shipment Tracking</p>
-            <h1 className="text-[24px] font-bold text-[#1D1D1F] tracking-tight mt-0.5">
-              {trf.id || transferId} · {trf.units || 12} SDP Platelet Units
-            </h1>
-          </div>
-          <span className={`px-3 py-1 text-[12px] font-bold rounded-full ${isDelivered ? "bg-[#E8F4EB] text-[#1A8A2C]" : "bg-[#0071E3] text-white animate-pulse"}`}>
-            {isDelivered ? "DELIVERED & SETTLED" : "IN TRANSIT (SHIPROCKET)"}
-          </span>
-        </div>
+// ── Pieces ───────────────────────────────────────────────────────────────────
 
-        {/* Route Details */}
-        <div className="p-4 bg-white rounded-[12px] border border-[#E5E5E7] shadow-sm mb-4">
-          <div className="flex items-center justify-between text-[15px] font-semibold text-[#1D1D1F]">
-            <span>📍 {trf.source_name || "Govt. General Hospital Chennai"}</span>
-            <span className="text-[#0071E3] font-bold">→ 8.4 km →</span>
-            <span>📍 {trf.destination_name || "Apollo Hospitals Greams Road"}</span>
-          </div>
+const STAGES = [
+  { key: "REQUESTED", label: "Requested" },
+  { key: "UNITS_RESERVED", label: "Authorised" },
+  { key: "SHIPMENT_CREATED", label: "Courier booked" },
+  { key: "IN_TRANSIT", label: "In transit" },
+  { key: "ARRIVED", label: "Arrived" },
+  { key: "TRANSFER_COMPLETED", label: "Delivered" },
+];
 
-          <div className="grid grid-cols-4 gap-3 text-center my-4 py-3 bg-[#F5F5F7] rounded-[8px]">
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Mapbox ETA</p>
-              <p className="text-[16px] font-bold text-[#1D1D1F]">{isDelivered ? "Arrived" : `${trf.eta_minutes || 18} mins`}</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Distance</p>
-              <p className="text-[16px] font-bold text-[#1D1D1F]">{trf.distance_km || 8.4} km</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Courier Partner</p>
-              <p className="text-[13px] font-bold text-[#0071E3]">{trf.courier_name || "Delhivery Express"}</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold text-[#AEAEB2]">Live Location Rule</p>
-              <p className="text-[12px] font-bold text-[#1A8A2C]">● LIVE LOCATION</p>
-            </div>
-          </div>
+function StageStrip({ transfer }: { transfer: Transfer }) {
+  const order = [
+    "REQUESTED", "ACCEPTED", "UNITS_RESERVED", "SHIPMENT_CREATED", "AWB_ASSIGNED",
+    "PICKUP_OTP_REQUIRED", "IN_TRANSIT", "ARRIVED", "DELIVERY_OTP_REQUIRED", "TRANSFER_COMPLETED",
+  ];
+  const current = order.indexOf(transfer.status);
 
-          {/* Temperature Status Indicator */}
-          <div className="p-3 bg-[#FFF8E1] border border-[#FFE082] rounded-[8px] flex items-center justify-between text-[11px] text-[#B25000]">
-            <span>
-              <strong className="font-bold">🧊 Cold-Chain Monitoring:</strong> 22.4 °C (Target: 20–24 °C) · Agitation Off: 18 min / 1440 min max
-            </span>
-            <span className="px-2 py-0.5 bg-[#E8F4EB] text-[#1A8A2C] font-bold rounded-full">
-              SIMULATED / DEMO
-            </span>
-          </div>
-        </div>
-
-        {/* 2-Point OTP Verification Gate */}
-        <div className="pt-3 border-t border-[#E5E5E7] flex items-center justify-between">
-          <div>
-            <p className="text-[11px] uppercase font-bold text-[#AEAEB2]">Custody Verification Handoff (OTP-Only)</p>
-            <p className="text-[12px] text-[#6E6E73]">
-              {isDelivered
-                ? "Transfer completed & inventory updated transactionally."
-                : trf.status === "RESERVED"
-                ? "Pickup Handoff: Enter 6-digit OTP to transfer custody to courier"
-                : "Destination Receipt: Enter 6-digit OTP to confirm receipt and update inventory"}
-            </p>
-          </div>
-
-          {!isDelivered && (
-            <div className="flex gap-2">
-              <button
-                onClick={() => { setOtpInput("849201"); setOtpModalOpen("pickup"); }}
-                className="px-4 py-2 bg-[#0071E3] text-white text-[12px] font-semibold rounded-full hover:bg-[#0058B0] transition-colors cursor-pointer"
-              >
-                Pickup OTP Handoff →
-              </button>
-              <button
-                onClick={() => { setOtpInput("123456"); setOtpModalOpen("delivery"); }}
-                className="px-4 py-2 bg-[#1A8A2C] text-white text-[12px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
-              >
-                Delivery OTP Receipt →
-              </button>
-            </div>
-          )}
-        </div>
-      </Card>
-
-      {/* Flipkart-Style Timeline Progress Tracker */}
-      <Card className="p-6 mb-6">
-        <SectionLabel>Shipment Progress Timeline</SectionLabel>
-        <p className="text-[12px] text-[#6E6E73] mb-5">
-          Real-time state machine lifecycle events. Synchronized across source and destination hospital consoles.
-        </p>
-
-        <div className="space-y-4 pl-4 border-l-2 border-[#E5E5E7] relative">
-          {[
-            { title: "Transfer Requested & Matched", desc: "PlateletIQ algorithm scored 12 SDP units feasibility", done: true },
-            { title: "Source Officer Accepted & Units Reserved", desc: "Inventory locked transactionally (AVAILABLE → RESERVED)", done: true },
-            { title: "Shiprocket Adhoc Order Created", desc: "AWB-SR-998877 assigned to Delhivery Express rider Ramesh V.", done: true },
-            { title: "Pickup OTP Verified & Handoff Complete", desc: "Source OTP 849201 verified. Custody changed to IN_TRANSIT", done: true },
-            { title: "In Transit via Mapbox Route", desc: "Live vehicle location: 13.0720, 80.2610 · 22.4 °C room temperature", done: !isDelivered, current: !isDelivered },
-            { title: "Delivery OTP Receipt Verification", desc: "Destination OTP 123456 verified upon courier arrival", done: isDelivered, current: isDelivered },
-            { title: "Transfer Completed & Inventory Settled", desc: "Source -12 SDP, Destination +12 SDP transactionally updated", done: isDelivered },
-          ].map((item, idx) => (
-            <div key={idx} className="relative pl-4">
+  return (
+    <div className="flex items-center gap-1.5 bg-white rounded-[14px] px-5 py-4" style={{ border: "1px solid #E5E5E7" }}>
+      {STAGES.map((stage, index) => {
+        const reached = current >= order.indexOf(stage.key);
+        return (
+          <div key={stage.key} className="flex items-center flex-1 min-w-0">
+            <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
               <span
-                className={`absolute -left-[25px] top-1 w-3.5 h-3.5 rounded-full border-2 border-white ${
-                  item.done ? "bg-[#1A8A2C]" : item.current ? "bg-[#0071E3] animate-ping" : "bg-[#AEAEB2]"
-                }`}
+                className="w-3 h-3 rounded-full"
+                style={{ background: reached ? "#1A7431" : "#E5E5E7" }}
               />
-              <p className={`text-[13px] font-bold ${item.done ? "text-[#1D1D1F]" : "text-[#8E8E93]"}`}>{item.title}</p>
-              <p className="text-[12px] text-[#6E6E73] mt-0.5">{item.desc}</p>
+              <span
+                className="text-[11px] whitespace-nowrap"
+                style={{ color: reached ? "#1D1D1F" : "#AEAEB2", fontWeight: reached ? 500 : 400 }}
+              >
+                {stage.label}
+              </span>
             </div>
+            {index < STAGES.length - 1 && (
+              <span
+                className="flex-1 h-px mx-1.5 mb-5"
+                style={{ background: current > order.indexOf(stage.key) ? "#1A7431" : "#E5E5E7" }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TransferPicker({ transfers, onPick }: { transfers: Transfer[]; onPick: (id: string) => void }) {
+  return (
+    <div className="px-8 py-7 max-w-[820px]">
+      <h1 className="text-[24px] font-semibold text-[#1D1D1F] tracking-tight">Track a shipment</h1>
+      <p className="text-[14px] text-[#6E6E73] mt-1.5 mb-6">
+        Pick a transfer that is currently in flight.
+      </p>
+
+      {transfers.length === 0 ? (
+        <p className="text-[14px] text-[#AEAEB2]">
+          Nothing is in flight. Open a transfer first, and it will appear here once the sending
+          facility authorises it.
+        </p>
+      ) : (
+        <div className="space-y-2.5">
+          {transfers.map((transfer) => (
+            <button
+              key={transfer.id}
+              onClick={() => onPick(transfer.id)}
+              className="w-full text-left bg-white rounded-[12px] px-5 py-4 cursor-pointer hover:shadow-md transition-shadow"
+              style={{ border: "1px solid #E5E5E7" }}
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-[14px] font-medium text-[#1D1D1F]">
+                    {transfer.units} {transfer.component_type} · {transfer.source.short_name} → {transfer.destination.short_name}
+                  </p>
+                  <p className="text-[12px] text-[#6E6E73] mt-0.5 font-mono">{transfer.id}</p>
+                </div>
+                <span className="text-[12px] text-[#6E6E73]">{transfer.status.replace(/_/g, " ").toLowerCase()}</span>
+              </div>
+            </button>
           ))}
         </div>
-      </Card>
-
-      {/* Cryptographic OTP Verification Modal (NO QR UI) */}
-      {otpModalOpen && (
-        <Drawer
-          title={otpModalOpen === "pickup" ? "Pickup OTP Handoff Verification" : "Delivery OTP Receipt Verification"}
-          subtitle="Cryptographic 6-Digit OTP Security Handoff (No QR)"
-          onClose={() => setOtpModalOpen(null)}
-        >
-          <div className="space-y-5">
-            <div className="p-4 bg-[#E8F1FC] border border-[#C8DCF5] rounded-[10px]">
-              <p className="text-[13px] font-bold text-[#0071E3] mb-1">
-                {otpModalOpen === "pickup" ? "Source Pickup Handoff" : "Destination Receipt Handoff"}
-              </p>
-              <p className="text-[12px] text-[#1D1D1F] leading-relaxed">
-                {otpModalOpen === "pickup"
-                  ? "Enter 6-digit OTP code to authorize pickup handoff to courier rider Ramesh V."
-                  : "Enter 6-digit OTP code to confirm receipt and execute transactional inventory settlement."}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-[12px] font-semibold text-[#1D1D1F] mb-1">6-Digit Verification OTP</label>
-              <input
-                type="text"
-                maxLength={6}
-                value={otpInput}
-                onChange={(e) => setOtpInput(e.target.value)}
-                className="w-full border border-[#E5E5E7] rounded-[8px] p-3 text-[20px] font-mono tracking-widest text-center"
-                placeholder="123456"
-              />
-              <p className="text-[11px] text-[#8E8E93] mt-1 text-center">Plaintext OTP is SHA-256 hashed backend-side and never stored in cleartext.</p>
-            </div>
-
-            <button
-              onClick={() => verifyOtpMutation.mutate({ purpose: otpModalOpen, otp: otpInput })}
-              className="w-full py-3 bg-[#1A8A2C] text-white text-[14px] font-semibold rounded-full hover:bg-[#157424] transition-colors cursor-pointer"
-            >
-              Verify OTP Code & Transfer Custody
-            </button>
-          </div>
-        </Drawer>
       )}
     </div>
   );
+}
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-[14px] p-5" style={{ border: "1px solid #E5E5E7" }}>
+      <h3 className="text-[11px] font-semibold text-[#AEAEB2] uppercase tracking-widest mb-3">{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex justify-between gap-4 py-2" style={{ borderBottom: "1px solid #F5F5F7" }}>
+      <span className="text-[13px] text-[#6E6E73] flex-shrink-0">{label}</span>
+      <span className={`text-[13px] text-[#1D1D1F] text-right ${mono ? "font-mono" : "font-medium"}`}>{value}</span>
+    </div>
+  );
+}
+
+function routeProviderLabel(provider: string | null): string {
+  switch (provider) {
+    case "mapbox_directions": return "Mapbox road routing";
+    case "osrm": return "OSRM road routing";
+    case "haversine_estimate": return "straight-line estimate (routing unavailable)";
+    default: return provider ?? "unknown";
+  }
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "—";
+  // Naive UTC from the API; mark it as UTC so the browser localises correctly.
+  const date = new Date(value.endsWith("Z") ? value : `${value}Z`);
+  return date.toLocaleString("en-IN", {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
 }

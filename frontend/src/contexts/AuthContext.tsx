@@ -1,147 +1,192 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
-import { authApi } from "../api/endpoints";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { clearStoredToken, getStoredToken, setStoredToken, setUnauthorizedHandler } from "../api/client";
+import { authApi, setActiveBankId } from "../api/endpoints";
+import type { AuthConfig, Facility, SessionUser } from "../api/types";
 
-interface User {
-  sub: string;
-  email: string;
-  name: string;
-  role: string;
-  bank_id: string;
-  bank_name: string;
-  picture?: string;
-}
+/**
+ * Sign-in has two stages, and the UI routes on which one you are at.
+ *
+ *   "anonymous" — no valid token; show the sign-in screen.
+ *   "identity"  — Google knows who you are, but no facility is chosen yet;
+ *                 show the facility picker.
+ *   "facility"  — bound to a facility; show the app.
+ *
+ * The facility is never assumed. Two laptops running this build are two
+ * different hospitals purely because each chose a different facility, and
+ * every bank-scoped API call follows from that choice.
+ */
+export type SessionStage = "anonymous" | "identity" | "facility";
 
-interface AuthContextType {
-  user: User | null;
-  token: string | null;
-  isAuthenticated: boolean;
+interface AuthContextValue {
+  user: SessionUser | null;
+  facility: Facility | null;
+  stage: SessionStage;
   isLoading: boolean;
-  loginAsDemo: () => Promise<void>;
-  loginWithGoogleToken: (idToken: string) => Promise<void>;
-  setAuthSession: (token: string, user: User) => void;
-  logout: () => void;
+  authConfig: AuthConfig | null;
+  authError: string | null;
+  signInWithGoogleCredential: (credential: string) => Promise<void>;
+  signInWithGoogleRedirect: () => Promise<void>;
+  signInForDevelopment: (email: string, name?: string) => Promise<void>;
+  selectFacility: (facilityId: string, role?: string) => Promise<void>;
+  changeFacility: () => void;
+  signOut: () => void;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const DEMO_USER_PROFILE: User = {
-  sub: "demo-user-001",
-  email: "demo@plateletiq.dev",
-  name: "Demo Officer",
-  role: "OFFICER",
-  bank_id: "TN-GGH-001",
-  bank_name: "Govt. General Hospital Chennai",
-};
+const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [facility, setFacility] = useState<Facility | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const applySession = useCallback((token: string, sessionUser: SessionUser) => {
+    setStoredToken(token);
+    setActiveBankId(sessionUser.bank_id);
+    setUser(sessionUser);
+  }, []);
+
+  const signOut = useCallback(() => {
+    clearStoredToken();
+    setActiveBankId(null);
+    setUser(null);
+    setFacility(null);
+  }, []);
+
+  // A 401 from any call means our token is gone or expired; drop to sign-in
+  // rather than leaving the app showing stale data it can no longer refresh.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setActiveBankId(null);
+      setUser(null);
+      setFacility(null);
+      setAuthError("Your session expired. Sign in again.");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   useEffect(() => {
-    const initAuth = async () => {
-      // 1. Check if token was passed in URL query param from Google OAuth callback
+    let cancelled = false;
+
+    async function restore() {
+      // The Google redirect flow hands the token back as a query parameter.
       const params = new URLSearchParams(window.location.search);
-      const urlToken = params.get("token");
+      const redirectToken = params.get("token");
+      const redirectError = params.get("auth_error");
 
-      let currentToken = urlToken || localStorage.getItem("plateletiq_token");
-
-      if (urlToken) {
-        localStorage.setItem("plateletiq_token", urlToken);
-        // Clean URL
+      if (redirectToken || redirectError) {
         window.history.replaceState({}, document.title, window.location.pathname);
       }
+      if (redirectError && !cancelled) {
+        setAuthError(`Google sign-in failed (${redirectError}).`);
+      }
+      if (redirectToken) {
+        setStoredToken(redirectToken);
+      }
 
-      if (currentToken) {
+      try {
+        const config = await authApi.getConfig();
+        if (!cancelled) setAuthConfig(config);
+      } catch {
+        // The sign-in screen renders its own "cannot reach the API" state.
+      }
+
+      if (getStoredToken()) {
         try {
-          // Verify session via /auth/me
-          const meData = await authApi.getMe();
-          if (meData) {
-            setUser(meData);
-            setToken(currentToken);
-          } else {
-            // Fallback for demo token
-            setUser(DEMO_USER_PROFILE);
-            setToken(currentToken);
+          const me = await authApi.getMe();
+          if (!cancelled) {
+            setActiveBankId(me.bank_id);
+            setUser(me);
           }
-        } catch (e) {
-          console.warn("Auth token validation failed, falling back gracefully:", e);
-          if (currentToken.startsWith("demo-") || currentToken === "demo-token-12345") {
-            setUser(DEMO_USER_PROFILE);
-            setToken(currentToken);
-          } else {
-            localStorage.removeItem("plateletiq_token");
+        } catch {
+          clearStoredToken();
+          if (!cancelled) {
+            setActiveBankId(null);
             setUser(null);
-            setToken(null);
           }
         }
       }
-      setIsLoading(false);
-    };
 
-    initAuth();
+      if (!cancelled) setIsLoading(false);
+    }
+
+    restore();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const setAuthSession = (newToken: string, newUser: User) => {
-    localStorage.setItem("plateletiq_token", newToken);
-    setToken(newToken);
-    setUser(newUser);
-  };
-
-  const loginAsDemo = async () => {
-    try {
-      const res = await authApi.googleCallback();
-      if (res && res.token) {
-        setAuthSession(res.token, res.user);
-      } else {
-        setAuthSession("demo-token-12345", DEMO_USER_PROFILE);
-      }
-    } catch (e) {
-      setAuthSession("demo-token-12345", DEMO_USER_PROFILE);
-    }
-  };
-
-  const loginWithGoogleToken = async (idToken: string) => {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
-    const res = await fetch(`${baseUrl}/auth/google/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credential: idToken }),
-    });
-    const json = await res.json();
-    if (json?.data?.token) {
-      setAuthSession(json.data.token, json.data.user);
-    }
-  };
-
-  const logout = () => {
-    localStorage.removeItem("plateletiq_token");
-    setToken(null);
-    setUser(null);
-  };
-
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        token,
-        isAuthenticated: !!token && !!user,
-        isLoading,
-        loginAsDemo,
-        loginWithGoogleToken,
-        setAuthSession,
-        logout,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
+  const signInWithGoogleCredential = useCallback(
+    async (credential: string) => {
+      setAuthError(null);
+      const result = await authApi.verifyGoogleCredential(credential);
+      applySession(result.token, result.user);
+    },
+    [applySession],
   );
+
+  const signInWithGoogleRedirect = useCallback(async () => {
+    setAuthError(null);
+    const { redirect_url } = await authApi.startGoogleRedirect();
+    window.location.href = redirect_url;
+  }, []);
+
+  const signInForDevelopment = useCallback(
+    async (email: string, name?: string) => {
+      setAuthError(null);
+      const result = await authApi.devSignIn(email, name);
+      applySession(result.token, result.user);
+    },
+    [applySession],
+  );
+
+  const selectFacility = useCallback(
+    async (facilityId: string, role = "OFFICER") => {
+      setAuthError(null);
+      const result = await authApi.selectFacility(facilityId, role);
+      applySession(result.token, result.user);
+      setFacility(result.facility);
+    },
+    [applySession],
+  );
+
+  /** Step back to the picker without losing the Google identity. */
+  const changeFacility = useCallback(() => {
+    setFacility(null);
+    setActiveBankId(null);
+    setUser((current) => (current ? { ...current, bank_id: null, bank_name: null, role: null } : current));
+  }, []);
+
+  const stage: SessionStage = !user ? "anonymous" : user.bank_id ? "facility" : "identity";
+
+  const value = useMemo(
+    () => ({
+      user,
+      facility,
+      stage,
+      isLoading,
+      authConfig,
+      authError,
+      signInWithGoogleCredential,
+      signInWithGoogleRedirect,
+      signInForDevelopment,
+      selectFacility,
+      changeFacility,
+      signOut,
+    }),
+    [
+      user, facility, stage, isLoading, authConfig, authError,
+      signInWithGoogleCredential, signInWithGoogleRedirect, signInForDevelopment,
+      selectFacility, changeFacility, signOut,
+    ],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-export const useAuth = () => {
+export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
+  if (!context) throw new Error("useAuth must be used inside an AuthProvider.");
   return context;
-};
+}

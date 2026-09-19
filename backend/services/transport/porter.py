@@ -81,6 +81,7 @@ class PorterProvider:
         drop_name: str,
         drop_mobile: str,
         units_count: int = 1,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Dispatch delivery order on Porter with cold-chain 20–24 °C instructions."""
         request_id = f"PLT-{transfer_id[:8]}-{int(time.time())}"
@@ -139,8 +140,9 @@ class PorterProvider:
             return {
                 "order_id": order_id,
                 "status": "IN_TRANSIT",
-                "driver": {"name": "Senthil Nathan", "mobile": "+91 94440 12345", "vehicle": "TN-07-CD-5678"},
-                "location": {"lat": 13.0715, "lng": 80.2585},
+                # Sandbox mode reports no GPS fix. A fabricated coordinate is
+                # indistinguishable from real telemetry once it reaches the map.
+                "location": None,
                 "provider": "porter_sandbox",
             }
 

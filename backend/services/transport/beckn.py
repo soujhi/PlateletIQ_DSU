@@ -35,6 +35,7 @@ class BecknLogisticsProvider:
         drop_name: str,
         drop_mobile: str,
         units_count: int = 1,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         order_id = f"BECKN-{uuid.uuid4().hex[:8].upper()}"
         instructions = [
@@ -55,8 +56,8 @@ class BecknLogisticsProvider:
         return {
             "order_id": order_id,
             "status": "IN_TRANSIT",
-            "driver": {"name": "Ramesh", "mobile": "+91 97900 87654", "vehicle": "TN-09-ONDC-99"},
-            "location": {"lat": 13.0750, "lng": 80.2600},
+            # No /on_track callback has been wired yet, so no fix is claimed.
+            "location": None,
             "provider": "beckn_ondc",
         }
 
